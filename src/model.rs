@@ -132,6 +132,51 @@ impl Store {
         self.todos.insert(ix, todo);
     }
 
+    /// Puts back several removed todos. Each index is where that todo sat
+    /// before *any* of them were removed, so they go back lowest first: every
+    /// earlier insert is then already in place when a later index is counted.
+    pub fn restore_all(&mut self, mut removed: Vec<(usize, Todo)>) {
+        removed.sort_by_key(|(ix, _)| *ix);
+        for (ix, todo) in removed {
+            self.restore(ix, todo);
+        }
+    }
+
+    /// Adds several todos at once, keeping their order: the first item ends
+    /// up on top, the way a pasted list reads. Returns the new ids.
+    pub fn add_all(&mut self, items: &[PastedItem]) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(items.len());
+        for item in items.iter().rev() {
+            let id = self.add(item.title.clone());
+            if item.done {
+                self.toggle(id);
+            }
+            ids.push(id);
+        }
+        ids.reverse();
+        ids
+    }
+
+    /// Removes every completed todo, returning each with the index it had so
+    /// the whole sweep can be undone in one go.
+    pub fn clear_completed(&mut self) -> Vec<(usize, Todo)> {
+        let mut removed = Vec::new();
+        let mut kept = Vec::with_capacity(self.todos.len());
+        for (ix, todo) in std::mem::take(&mut self.todos).into_iter().enumerate() {
+            if todo.done {
+                removed.push((ix, todo));
+            } else {
+                kept.push(todo);
+            }
+        }
+        self.todos = kept;
+        removed
+    }
+
+    pub fn completed_count(&self) -> usize {
+        self.todos.iter().filter(|t| t.done).count()
+    }
+
     /// Moves a todo to an absolute position. Out-of-range targets clamp rather
     /// than panic, so callers can be sloppy.
     pub fn move_to(&mut self, id: u64, to: usize) {
@@ -174,6 +219,57 @@ impl Store {
             .map(|t| t.id)
             .collect()
     }
+}
+
+/// One line of a pasted list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastedItem {
+    pub title: String,
+    pub done: bool,
+}
+
+/// Turns pasted text into to-dos, one per non-blank line.
+///
+/// A list copied from anywhere — a markdown checklist, a bulleted note, a
+/// numbered email — arrives with its markers still on. Those are stripped, and
+/// a ticked checkbox (`- [x]`) comes in already done.
+pub fn parse_paste(text: &str) -> Vec<PastedItem> {
+    text.lines()
+        .filter_map(|line| {
+            let mut rest = line.trim();
+            // A bullet: `-`, `*`, `+` or `•`, then a space.
+            for bullet in ["- ", "* ", "+ ", "• "] {
+                if let Some(r) = rest.strip_prefix(bullet) {
+                    rest = r.trim_start();
+                    break;
+                }
+            }
+            // Or a number: `1.` or `1)`, then a space.
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            if digits > 0 {
+                let after = &rest[digits..];
+                if let Some(r) = after
+                    .strip_prefix(". ")
+                    .or_else(|| after.strip_prefix(") "))
+                {
+                    rest = r.trim_start();
+                }
+            }
+            let mut done = false;
+            for (mark, is_done) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] {
+                if let Some(r) = rest.strip_prefix(mark) {
+                    rest = r.trim_start();
+                    done = is_done;
+                    break;
+                }
+            }
+            let title = rest.trim();
+            (!title.is_empty()).then(|| PastedItem {
+                title: title.to_string(),
+                done,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -325,6 +421,72 @@ mod tests {
         assert_eq!(s.version, STORE_VERSION);
         let t = &s.todos[0];
         assert!(!t.done && !t.expanded && t.body.is_empty() && t.completed_at.is_none());
+    }
+
+    #[test]
+    fn a_pasted_list_loses_its_markers_and_blank_lines() {
+        let got = parse_paste(
+            "Groceries:\n\n- oat milk\n* coffee\n  + bread  \n• jam\n1. call Sam\n12) renew domain\n",
+        );
+        let titles: Vec<_> = got.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Groceries:",
+                "oat milk",
+                "coffee",
+                "bread",
+                "jam",
+                "call Sam",
+                "renew domain"
+            ]
+        );
+        assert!(got.iter().all(|i| !i.done));
+    }
+
+    #[test]
+    fn pasted_checkboxes_keep_their_state() {
+        let got = parse_paste("- [ ] open\n- [x] shut\n[X] also shut\n");
+        let state: Vec<_> = got.iter().map(|i| (i.title.as_str(), i.done)).collect();
+        assert_eq!(
+            state,
+            [("open", false), ("shut", true), ("also shut", true)]
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_the_title_is_not_a_marker() {
+        let got = parse_paste("2026 plans\n3.5 kg flour");
+        assert_eq!(got[0].title, "2026 plans");
+        assert_eq!(got[1].title, "3.5 kg flour");
+    }
+
+    #[test]
+    fn add_all_keeps_the_pasted_order_top_down() {
+        let mut s = store_with(1);
+        let ids = s.add_all(&parse_paste("first\n- [x] second\nthird"));
+        assert_eq!(ids.len(), 3);
+        let titles: Vec<_> = s.todos.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["first", "second", "third", "task 0"]);
+        assert_eq!(s.todos[0].id, ids[0]);
+        assert!(s.todos[1].done && s.todos[1].completed_at.is_some());
+    }
+
+    #[test]
+    fn clearing_completed_can_be_undone_exactly() {
+        let mut s = store_with(6);
+        for ix in [0, 2, 5] {
+            let id = s.todos[ix].id;
+            s.toggle(id);
+        }
+        let before = s.todos.clone();
+        let removed = s.clear_completed();
+        assert_eq!(removed.len(), 3);
+        assert_eq!(s.todos.len(), 3);
+        assert!(!s.any_completed());
+        assert_eq!(s.completed_count(), 0);
+        s.restore_all(removed);
+        assert_eq!(s.todos, before, "every row back where it was");
     }
 
     #[test]
