@@ -413,12 +413,17 @@ fn paint_icon_button(
 /// together, so the line wanders off the middle of the letters as the font
 /// size changes. Hanging it off the baseline at a fixed fraction of the font
 /// size keeps it centred at every size.
+///
+/// `progress` draws it part-way, 0 to 1, left to right and row by row, so
+/// checking something off crosses it out rather than swapping in a struck
+/// copy.
 pub fn strike(
     painter: &egui::Painter,
     galley: &egui::Galley,
     origin: Pos2,
     color: Color32,
     size: f32,
+    progress: f32,
 ) {
     // Roughly half the x-height of a typical UI face, which puts the line
     // through the middle of the lowercase letters and across the middle of
@@ -426,22 +431,33 @@ pub fn strike(
     let rise = size * 0.29;
     let width = (size / 13.0).max(1.0);
 
-    for placed in &galley.rows {
-        let mut glyphs = placed.row.glyphs.iter().filter(|g| !g.chr.is_whitespace());
-        let Some(first) = glyphs.next() else {
-            continue;
-        };
-        let last = glyphs.next_back().unwrap_or(first);
-        let row = origin + placed.pos.to_vec2();
-        // One straight line per row, taken from the first glyph's baseline:
-        // a title can mix sizes (inline code is a point smaller) and a line
-        // that stepped up and down mid-word would read as a mistake.
-        let y = row.y + first.pos.y - rise;
+    let spans: Vec<(f32, f32, f32)> = galley
+        .rows
+        .iter()
+        .filter_map(|placed| {
+            let mut glyphs = placed.row.glyphs.iter().filter(|g| !g.chr.is_whitespace());
+            let first = glyphs.next()?;
+            let last = glyphs.next_back().unwrap_or(first);
+            let row = origin + placed.pos.to_vec2();
+            // One straight line per row, taken from the first glyph's
+            // baseline: a title can mix sizes (inline code is a point
+            // smaller) and a line that stepped up and down mid-word would
+            // read as a mistake.
+            let y = row.y + first.pos.y - rise;
+            Some((row.x + first.pos.x, row.x + last.max_x(), y))
+        })
+        .collect();
+
+    let total: f32 = spans.iter().map(|(a, b, _)| b - a).sum();
+    let mut budget = total * progress.clamp(0.0, 1.0);
+    for (a, b, y) in spans {
+        if budget <= 0.0 {
+            break;
+        }
+        let end = b.min(a + budget);
+        budget -= b - a;
         painter.line_segment(
-            [
-                Pos2::new(row.x + first.pos.x, y),
-                Pos2::new(row.x + last.max_x(), y),
-            ],
+            [Pos2::new(a, y), Pos2::new(end, y)],
             Stroke::new(width, color),
         );
     }

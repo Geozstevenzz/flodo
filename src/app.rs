@@ -1,7 +1,8 @@
 //! The application: state, the render/edit swap, and the settings sheet.
 
+use crate::celebrate::Fireworks;
 use crate::markdown::{self, FAMILY_MONO, FAMILY_UI};
-use crate::model::{Store, Todo};
+use crate::model::{self, Store, Todo};
 use crate::settings::{
     Appearance, FontChoice, Settings, FONT_SIZE_RANGE, OPACITY_RANGE, SPACING_RANGE,
 };
@@ -9,6 +10,7 @@ use crate::theme::{Accent, Palette};
 use crate::{capture, fonts, hotkey, store, ui};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, Vec2};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
@@ -25,6 +27,10 @@ const ROW_RADIUS: u8 = 7;
 /// How long a deleted to-do stays offered back before the toast fades.
 const TOAST_TTL: Duration = Duration::from_secs(6);
 const TOAST_FADE: f32 = 0.5;
+/// How long a newly arrived row glows, so the eye finds where it landed.
+const ARRIVE: Duration = Duration::from_millis(900);
+/// How many steps back Cmd+Z can go.
+const UNDO_DEPTH: usize = 50;
 
 /// The modifier every shortcut uses, spelled the way this platform spells it.
 /// Tooltips used to say "Cmd" everywhere, which is wrong on the two platforms
@@ -39,14 +45,17 @@ pub const MOD: &str = "Ctrl";
 fn shortcuts(settings: &Settings) -> Vec<(String, &'static str)> {
     let m = |k: &str| format!("{MOD}+{k}");
     let mut list = vec![
-        ("Enter".to_string(), "Add the to-do, keep typing"),
+        ("Enter".to_string(), "Add, or edit the selected one"),
         (m("Enter"), "Add or edit the description"),
+        ("Up / Down".to_string(), "Walk the list"),
+        ("Space".to_string(), "Check off the selected one"),
         (m("N"), "Jump to the composer"),
         (m("E"), "Show / hide completed"),
+        (m("Shift+Backspace"), "Clear completed"),
         (m("P"), "Pin / unpin from the top"),
         (m(","), "Settings"),
-        (m("Z"), "Undo the last delete"),
-        (m("Up / Down"), "Move the to-do you're editing"),
+        (m("Z"), "Undo the last change"),
+        (m("Up / Down"), "Move the selected to-do"),
         (m("Backspace"), "Delete it"),
         ("Esc".to_string(), "Stop editing, or close this"),
         (settings.hotkey.clone(), "Summon Flodo from anywhere"),
@@ -67,8 +76,50 @@ fn shortcuts(settings: &Settings) -> Vec<(String, &'static str)> {
 /// about, for a row that had already vanished without comment.
 struct Toast {
     message: String,
-    undoable: bool,
+    action: Option<ToastAction>,
     at: Instant,
+}
+
+/// The one thing a toast can offer to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastAction {
+    /// Take back the change with this sequence number — offered only while it
+    /// is still the newest thing on the undo stack, so the link never undoes
+    /// something other than what the toast says.
+    Undo(u64),
+    /// The list is finished: sweep the completed ones away.
+    ClearCompleted,
+}
+
+/// Something Cmd+Z can take back.
+#[derive(Debug, Clone)]
+enum Change {
+    /// Rows that were removed, each with the index it had.
+    Removed(Vec<(usize, Todo)>),
+    Toggled(u64),
+    /// Rows that arrived all at once, from a pasted list.
+    Added(Vec<u64>),
+}
+
+#[derive(Debug, Clone)]
+struct Undo {
+    seq: u64,
+    change: Change,
+}
+
+/// The composer's widget id, so focus can be asked about before it is drawn.
+fn composer_id() -> egui::Id {
+    egui::Id::new("composer")
+}
+
+/// A row's checkbox, by id, so a check-off from the keyboard bursts out of the
+/// same place a click does.
+fn checkbox_id(todo: u64) -> egui::Id {
+    egui::Id::new(("check", todo))
+}
+
+fn ring_id() -> egui::Id {
+    egui::Id::new("progress-ring")
 }
 
 /// Enough of a title to recognise it, without stretching the toast past the
@@ -135,8 +186,17 @@ pub struct Flodo {
     composer_focus: bool,
     show_settings: bool,
     show_shortcuts: bool,
-    undo: Option<(usize, Todo)>,
+    undo: Vec<Undo>,
+    undo_seq: u64,
     toast: Option<Toast>,
+    /// The row the keyboard is on, when it is on the list rather than in a
+    /// text field. Arrow keys walk it; Space, Enter and Backspace act on it.
+    cursor: Option<u64>,
+    /// Set when the cursor moves, so its row is scrolled into view once.
+    scroll_to_cursor: bool,
+    fireworks: Fireworks,
+    /// Rows that have just appeared, and when, for the glow that shows where.
+    arrived: HashMap<u64, Instant>,
     /// The hover hint the title bar is showing. Held for a beat after the
     /// pointer leaves the control, so it fades instead of blinking out.
     hint: Option<ui::Hint>,
@@ -185,8 +245,13 @@ impl Flodo {
             composer_focus: false,
             show_settings: false,
             show_shortcuts: false,
-            undo: None,
+            undo: Vec::new(),
+            undo_seq: 0,
             toast: None,
+            cursor: None,
+            scroll_to_cursor: false,
+            fireworks: Fireworks::default(),
+            arrived: HashMap::new(),
             hint: None,
             dirty_todos: None,
             dirty_settings: None,
@@ -250,12 +315,41 @@ impl Flodo {
                 self.store.add("Pick up oat milk and coffee");
                 // A delete that has already happened, so the shot shows the
                 // offer rather than the row.
-                self.undo = Some((1, Todo::new(1, "Book the dentist")));
+                let seq =
+                    self.push_undo(Change::Removed(vec![(1, Todo::new(1, "Book the dentist"))]));
                 self.toast = Some(Toast {
                     message: "Deleted “Book the dentist”".into(),
-                    undoable: true,
+                    action: Some(ToastAction::Undo(seq)),
                     at: Instant::now(),
                 });
+            }
+            // A run of check-offs caught mid-burst, with the keyboard on the
+            // list.
+            "celebrate" => {
+                self.store.add("Water the plants");
+                let b = self.store.add("Reply to Sam about the offsite");
+                let a = self.store.add("Renew the car registration");
+                self.store.add("Pick up oat milk and coffee");
+                let now = Instant::now();
+                for id in [a, b] {
+                    self.store.toggle(id);
+                    self.fireworks.check_off(checkbox_id(id), now);
+                }
+                self.fireworks.backdate(Duration::from_millis(230));
+                self.cursor = Some(b);
+            }
+            // The last one going: the finale, and the offer to clear up.
+            "finale" => {
+                let ids = [
+                    self.store.add("Water the plants"),
+                    self.store.add("Renew the car registration"),
+                    self.store.add("Pick up oat milk and coffee"),
+                ];
+                for id in &ids[1..] {
+                    self.store.toggle(*id);
+                }
+                self.toggle(ids[0]);
+                self.fireworks.backdate(Duration::from_millis(260));
             }
             // A realistic list, for the README screenshots.
             "hero" => {
@@ -412,29 +506,144 @@ impl Flodo {
         }
     }
 
+    /// Records something Cmd+Z can take back, and returns its number.
+    fn push_undo(&mut self, change: Change) -> u64 {
+        self.undo_seq += 1;
+        self.undo.push(Undo {
+            seq: self.undo_seq,
+            change,
+        });
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.undo_seq
+    }
+
+    fn say(&mut self, message: String, action: Option<ToastAction>) {
+        self.toast = Some(Toast {
+            message,
+            action,
+            at: Instant::now(),
+        });
+    }
+
     fn delete(&mut self, id: u64) {
         if self.editing.as_ref().is_some_and(|e| e.id == id) {
             self.editing = None;
         }
+        if self.cursor == Some(id) {
+            self.cursor = self.neighbour(id);
+        }
         if let Some((ix, todo)) = self.store.remove(id) {
-            self.toast = Some(Toast {
-                message: format!("Deleted “{}”", excerpt(&todo.title, 24)),
-                undoable: true,
-                at: Instant::now(),
-            });
-            self.undo = Some((ix, todo));
+            let message = format!("Deleted “{}”", excerpt(&todo.title, 24));
+            let seq = self.push_undo(Change::Removed(vec![(ix, todo)]));
+            self.say(message, Some(ToastAction::Undo(seq)));
             self.touch_todos();
         }
     }
 
-    /// Puts back the last deleted to-do, if there is one.
-    fn undo_delete(&mut self) {
-        let Some((ix, todo)) = self.undo.take() else {
+    /// Checks a to-do off, or back on. Checking one off is the moment the app
+    /// exists for, so it is the one that gets a burst — and finishing the
+    /// whole list gets a bigger one, and the offer to clear it away.
+    fn toggle(&mut self, id: u64) {
+        let Some(was_done) = self.store.get(id).map(|t| t.done) else {
             return;
         };
-        self.store.restore(ix, todo);
+        // A row about to vanish under "hide completed" hands the keyboard on
+        // to the next one, so a run of Space presses walks down the list.
+        if !was_done && self.settings.hide_completed && self.cursor == Some(id) {
+            self.cursor = self.neighbour(id);
+        }
+        self.store.toggle(id);
+        self.push_undo(Change::Toggled(id));
+        self.touch_todos();
+        if was_done {
+            // Taken back off: "All done" is no longer true.
+            if self
+                .toast
+                .as_ref()
+                .is_some_and(|t| t.action == Some(ToastAction::ClearCompleted))
+            {
+                self.toast = None;
+            }
+            return;
+        }
+
+        let total = self.store.todos.len();
+        let finished = total > 1 && self.store.completed_count() == total;
+        if self.settings.celebrate {
+            let now = Instant::now();
+            self.fireworks.check_off(checkbox_id(id), now);
+            if finished {
+                self.fireworks.finale(checkbox_id(id), ring_id(), now);
+            }
+        }
+        if finished {
+            self.say(
+                format!("All {total} done"),
+                Some(ToastAction::ClearCompleted),
+            );
+        }
+    }
+
+    /// Sweeps every completed to-do away in one go, and offers them back.
+    fn clear_completed(&mut self) {
+        if self
+            .cursor
+            .is_some_and(|c| self.store.get(c).is_some_and(|t| t.done))
+        {
+            self.cursor = None;
+        }
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| self.store.get(e.id).is_some_and(|t| t.done))
+        {
+            self.editing = None;
+        }
+        let removed = self.store.clear_completed();
+        if removed.is_empty() {
+            return;
+        }
+        let n = removed.len();
+        let seq = self.push_undo(Change::Removed(removed));
+        self.say(
+            format!("Cleared {n} completed"),
+            Some(ToastAction::Undo(seq)),
+        );
+        self.touch_todos();
+    }
+
+    /// Takes back the newest change on the undo stack, whatever it was.
+    fn undo_last(&mut self) {
+        let Some(undo) = self.undo.pop() else {
+            return;
+        };
+        match undo.change {
+            Change::Removed(rows) => {
+                let now = Instant::now();
+                for (_, todo) in &rows {
+                    self.arrived.insert(todo.id, now);
+                }
+                self.store.restore_all(rows);
+            }
+            Change::Toggled(id) => self.store.toggle(id),
+            Change::Added(ids) => {
+                for id in ids {
+                    self.store.remove(id);
+                }
+            }
+        }
         self.touch_todos();
         self.toast = None;
+    }
+
+    /// Whether the toast's action is still on offer.
+    fn toast_action_live(&self, action: ToastAction) -> bool {
+        match action {
+            ToastAction::Undo(seq) => self.undo.last().is_some_and(|u| u.seq == seq),
+            ToastAction::ClearCompleted => self.store.any_completed(),
+        }
     }
 
     fn add_from_composer(&mut self) -> Option<u64> {
@@ -443,6 +652,7 @@ impl Flodo {
             return None;
         }
         let id = self.store.add(title);
+        self.arrived.insert(id, Instant::now());
         self.composer.clear();
         // Keep focus so you can keep typing straight into the next one.
         self.composer_focus = true;
@@ -450,7 +660,79 @@ impl Flodo {
         Some(id)
     }
 
-    /// Expands a to-do and puts the cursor in its description.
+    /// A pasted list becomes a to-do per line, in the order it was written.
+    /// Returns false for anything that is not a list, which is then left to
+    /// paste as ordinary text.
+    fn paste_list(&mut self, text: &str) -> bool {
+        let items = model::parse_paste(text);
+        if items.len() < 2 {
+            return false;
+        }
+        let ids = self.store.add_all(&items);
+        let now = Instant::now();
+        for id in &ids {
+            self.arrived.insert(*id, now);
+        }
+        let n = ids.len();
+        let seq = self.push_undo(Change::Added(ids));
+        self.say(format!("Added {n} to-dos"), Some(ToastAction::Undo(seq)));
+        self.composer_focus = true;
+        self.cursor = None;
+        self.touch_todos();
+        true
+    }
+
+    fn visible(&self) -> Vec<u64> {
+        self.store.visible_ids(self.settings.hide_completed)
+    }
+
+    /// The row the keyboard should land on when `id` goes away: the one below
+    /// it, or the one above if it was last.
+    fn neighbour(&self, id: u64) -> Option<u64> {
+        let visible = self.visible();
+        let ix = visible.iter().position(|v| *v == id)?;
+        visible
+            .get(ix + 1)
+            .or_else(|| ix.checked_sub(1).and_then(|i| visible.get(i)))
+            .copied()
+    }
+
+    /// Moves the keyboard cursor `by` rows. Walking up off the top of the list
+    /// goes back into the composer, which is where walking down started.
+    fn step_cursor(&mut self, ctx: &egui::Context, by: isize) {
+        let visible = self.visible();
+        if visible.is_empty() {
+            return;
+        }
+        let here = self
+            .cursor
+            .and_then(|c| visible.iter().position(|v| *v == c));
+        let next = match here {
+            None if by > 0 => Some(0),
+            None => Some(visible.len() - 1),
+            Some(ix) => {
+                let to = ix as isize + by;
+                if to < 0 {
+                    None
+                } else {
+                    Some((to as usize).min(visible.len() - 1))
+                }
+            }
+        };
+        match next {
+            Some(ix) => {
+                self.cursor = Some(visible[ix]);
+                self.scroll_to_cursor = true;
+                ctx.memory_mut(|m| m.surrender_focus(composer_id()));
+            }
+            None => {
+                self.cursor = None;
+                self.composer_focus = true;
+            }
+        }
+    }
+
+    /// Expands a to-do and puts the caret in its description.
     fn open_body(&mut self, id: u64) {
         if let Some(t) = self.store.get_mut(id) {
             t.expanded = true;
@@ -475,11 +757,15 @@ impl Flodo {
                 self.commit_edit();
                 self.composer_focus = true;
             }
-            None => {
-                if let Some(id) = self.add_from_composer() {
-                    self.open_body(id);
+            None => match self.cursor {
+                // The keyboard is on a row: open that one's description.
+                Some(id) if self.composer.trim().is_empty() => self.open_body(id),
+                _ => {
+                    if let Some(id) = self.add_from_composer() {
+                        self.open_body(id);
+                    }
                 }
-            }
+            },
         }
     }
 
@@ -586,21 +872,36 @@ impl Flodo {
         use egui::{Key, Modifiers};
         let cmd = Modifiers::COMMAND;
 
+        let composer_focused = ctx.memory(|m| m.has_focus(composer_id()));
+        let anything_focused = ctx.memory(|m| m.focused().is_some());
+        let on_list = !self.show_settings && self.editing.is_none();
+
         // Esc: leave whatever we're in, innermost first.
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.editing.is_some() {
                 self.cancel_edit();
             } else if self.show_settings {
                 self.show_settings = false;
+            } else if self.cursor.is_some() {
+                self.cursor = None;
+                self.composer_focus = true;
+            } else if composer_focused && !self.composer.is_empty() {
+                self.composer.clear();
+                self.composer_focus = true;
             } else {
                 self.toast = None;
             }
+        }
+
+        if on_list && (composer_focused || !anything_focused) {
+            self.route_typing(ctx, composer_focused);
         }
 
         let pressed = |key: Key| ctx.input_mut(|i| i.consume_key(cmd, key));
 
         if pressed(Key::N) {
             self.composer_focus = true;
+            self.cursor = None;
             self.show_settings = false;
         }
         // Consumed here rather than in the text fields, so neither the
@@ -614,6 +915,13 @@ impl Flodo {
         // Cmd+E, not Cmd+H: macOS reserves Cmd+H for Hide App.
         if pressed(Key::E) {
             self.settings.hide_completed = !self.settings.hide_completed;
+            if self.settings.hide_completed
+                && self
+                    .cursor
+                    .is_some_and(|c| self.store.get(c).is_some_and(|t| t.done))
+            {
+                self.cursor = None;
+            }
             self.touch_settings();
         }
         if pressed(Key::P) {
@@ -622,15 +930,23 @@ impl Flodo {
             self.touch_settings();
         }
         if pressed(Key::Z) {
-            self.undo_delete();
+            self.undo_last();
         }
-        if let Some(id) = self.editing.as_ref().map(|e| e.id) {
+        // Before plain Cmd+Backspace: egui matches modifiers loosely, so the
+        // shorter chord would otherwise swallow this one.
+        if ctx.input_mut(|i| i.consume_key(cmd | Modifiers::SHIFT, Key::Backspace)) {
+            self.clear_completed();
+        }
+        let target = self.editing.as_ref().map(|e| e.id).or(self.cursor);
+        if let Some(id) = target {
             if pressed(Key::ArrowUp) {
                 self.store.move_up(id);
+                self.scroll_to_cursor = true;
                 self.touch_todos();
             }
             if pressed(Key::ArrowDown) {
                 self.store.move_down(id);
+                self.scroll_to_cursor = true;
                 self.touch_todos();
             }
             if pressed(Key::Backspace) {
@@ -640,6 +956,89 @@ impl Flodo {
         if pressed(Key::W) || pressed(Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+
+        if on_list {
+            self.walk_list(ctx, composer_focused, anything_focused);
+        }
+    }
+
+    /// The list, driven from the keyboard. Down out of the composer lands on
+    /// the first row; from there the arrows walk, Space checks off, Enter
+    /// edits, Backspace deletes, and Up past the top goes back to typing.
+    fn walk_list(&mut self, ctx: &egui::Context, composer_focused: bool, anything_focused: bool) {
+        use egui::{Key, Modifiers};
+        let plain = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
+
+        if composer_focused {
+            if plain(Key::ArrowDown) {
+                self.step_cursor(ctx, 1);
+            }
+            return;
+        }
+        if anything_focused {
+            return;
+        }
+        if plain(Key::ArrowDown) {
+            self.step_cursor(ctx, 1);
+        }
+        if plain(Key::ArrowUp) {
+            self.step_cursor(ctx, -1);
+        }
+        let Some(id) = self.cursor else {
+            return;
+        };
+        if plain(Key::Space) {
+            self.toggle(id);
+        }
+        if plain(Key::Enter) {
+            self.start_edit(id, Field::Title);
+        }
+        if plain(Key::Backspace) || plain(Key::Delete) {
+            self.delete(id);
+            self.scroll_to_cursor = true;
+        }
+    }
+
+    /// Typing never needs aiming. With the keyboard on the list, or after a
+    /// click on the background, letters go to the composer as if it had been
+    /// focused all along; and a pasted list becomes a to-do per line wherever
+    /// it lands.
+    fn route_typing(&mut self, ctx: &egui::Context, composer_focused: bool) {
+        let events = ctx.input(|i| i.events.clone());
+        let mut typed = String::new();
+        let mut pasted: Option<String> = None;
+        for e in &events {
+            match e {
+                egui::Event::Paste(text) => pasted = Some(text.clone()),
+                egui::Event::Text(text) if !composer_focused => typed.push_str(text),
+                _ => {}
+            }
+        }
+
+        if let Some(text) = pasted {
+            if self.paste_list(&text) {
+                ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+            } else if !composer_focused {
+                typed.push_str(text.trim());
+                ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+            }
+        }
+
+        if composer_focused {
+            return;
+        }
+        // Space is the check-off key while a row is selected; a lone space
+        // would be trimmed away anyway.
+        if self.cursor.is_some() || self.composer.is_empty() {
+            typed = typed.trim_start().to_string();
+        }
+        if typed.is_empty() {
+            return;
+        }
+        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+        self.composer.push_str(&typed);
+        self.composer_focus = true;
+        self.cursor = None;
     }
 
     fn apply_window_level(&self, ctx: &egui::Context) {
@@ -662,8 +1061,10 @@ impl Flodo {
             // The mark doubles as the only status the app shows: how much of
             // the list is behind you.
             let total = self.store.todos.len();
-            let done = self.store.todos.iter().filter(|t| t.done).count();
-            let (dot, resp) = ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+            let done = self.store.completed_count();
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+            // A stable id, so the finale can find the ring to burst out of.
+            let resp = ui.interact(dot, ring_id(), egui::Sense::hover());
             ui::progress_ring(ui.painter(), dot, done, total, p);
             let progress = match (done, total) {
                 (_, 0) => "Nothing on the list".to_string(),
@@ -823,7 +1224,20 @@ impl Flodo {
                 }
                 ui.add_space(6.0);
 
+                if self.composer_focus {
+                    // Focus handed over from elsewhere — a summon, typing
+                    // routed in from the list — always lands after whatever
+                    // is already written, never in the middle of it.
+                    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), composer_id())
+                        .unwrap_or_default();
+                    let end = egui::text::CCursor::new(self.composer.chars().count());
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                    state.store(ui.ctx(), composer_id());
+                }
                 let edit = egui::TextEdit::singleline(&mut self.composer)
+                    .id(composer_id())
                     .desired_width(ui.available_width())
                     .frame(egui::Frame::NONE)
                     .hint_text(
@@ -843,6 +1257,10 @@ impl Flodo {
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let _ = self.add_from_composer();
                 }
+                if resp.has_focus() {
+                    // Typing again: the keyboard has left the list.
+                    self.cursor = None;
+                }
                 resp.has_focus()
             })
             .inner
@@ -858,7 +1276,7 @@ impl Flodo {
     /// Nothing to draw is still something to say. An empty list is where the
     /// two keystrokes worth knowing get taught, and a finished one is worth
     /// marking rather than leaving as a blank panel.
-    fn empty_state(&self, ui: &mut egui::Ui, p: &Palette) {
+    fn empty_state(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let size = self.settings.font_size;
         let fresh = self.store.todos.is_empty();
         ui.add_space(22.0);
@@ -884,17 +1302,83 @@ impl Flodo {
                 vec![
                     "Type above and press Enter".to_string(),
                     format!("{MOD}+Enter adds a description"),
+                    "Paste a list to add every line".to_string(),
                 ]
             } else {
                 vec![format!("{MOD}+E brings the completed ones back")]
             } {
                 ui.label(egui::RichText::new(line).color(p.muted).size(size * 0.85));
             }
+            if !fresh {
+                ui.add_space(4.0);
+                let n = self.store.completed_count();
+                let clear = ui::text_button(ui, p, &format!("Clear all {n}"), size * 0.85);
+                ui::hint(
+                    ui.ctx(),
+                    &clear,
+                    ui::Action::new("Clear the completed ones")
+                        .keys(&format!("{MOD}+Shift+Backspace")),
+                );
+                if clear.clicked() {
+                    self.clear_completed();
+                }
+            }
+        });
+    }
+
+    /// Under the list while completed rows are showing: how many there are,
+    /// and the one click that sweeps them away.
+    fn completed_footer(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let n = self.store.completed_count();
+        // The "All done" toast is already offering this.
+        let offered = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.action == Some(ToastAction::ClearCompleted));
+        if n == 0 || self.settings.hide_completed || offered {
+            return;
+        }
+        let size = self.settings.font_size * 0.82;
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            // In line with the titles: past the grip, the checkbox, and the
+            // gaps a row puts between them.
+            let gap = ui.spacing().item_spacing.x;
+            ui.add_space(10.0 + gap + ui::ICON + 6.0 + gap);
+            ui.label(
+                egui::RichText::new(format!("{n} completed"))
+                    .color(p.muted.gamma_multiply(0.8))
+                    .size(size),
+            );
+            ui.label(
+                egui::RichText::new("·")
+                    .color(p.muted.gamma_multiply(0.5))
+                    .size(size),
+            );
+            let clear = ui::text_button(ui, p, "Clear", size);
+            ui::hint(
+                ui.ctx(),
+                &clear,
+                ui::Action::new("Clear the completed ones").keys(&format!("{MOD}+Shift+Backspace")),
+            );
+            if clear.clicked() {
+                self.clear_completed();
+            }
         });
     }
 
     fn list(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        let visible = self.store.visible_ids(self.settings.hide_completed);
+        let visible = self.visible();
+
+        // The keyboard's row can vanish under it — deleted from the CLI, or
+        // hidden — and a cursor on nothing would swallow the arrow keys.
+        if self.cursor.is_some_and(|c| !visible.contains(&c)) {
+            self.cursor = None;
+        }
+        self.arrived.retain(|_, at| at.elapsed() < ARRIVE);
+        if !self.arrived.is_empty() {
+            ui.ctx().request_repaint();
+        }
 
         if visible.is_empty() {
             self.empty_state(ui, p);
@@ -953,14 +1437,15 @@ impl Flodo {
             }
             ui.add_space(self.settings.spacing);
         }
+        self.scroll_to_cursor = false;
+        self.completed_footer(ui, p);
 
         if let (Some(d), Some(e)) = (draft, self.editing.as_mut()) {
             e.draft = d;
         }
 
         if let Some(id) = toggle {
-            self.store.toggle(id);
-            self.touch_todos();
+            self.toggle(id);
         }
         if let Some(id) = expand {
             let empty = self.store.get(id).is_some_and(|t| !t.has_body());
@@ -977,6 +1462,9 @@ impl Flodo {
         if let Some((id, field)) = edit {
             self.commit_edit();
             self.start_edit(id, field);
+            // Clicking into a row puts the keyboard there too, so Enter, then
+            // the arrows, carry on from where the mouse left off.
+            self.cursor = Some(id);
         }
         if let Some(id) = remove {
             self.delete(id);
@@ -1003,6 +1491,14 @@ impl Flodo {
             Some(e) if e.id == todo.id && e.field == Field::Body
         );
 
+        let selected = self.cursor == Some(todo.id) && !editing_title && !editing_body;
+        // How far through its arrival glow a new row is: 0 just landed, 1
+        // settled.
+        let arrival = self
+            .arrived
+            .get(&todo.id)
+            .map(|at| (at.elapsed().as_secs_f32() / ARRIVE.as_secs_f32()).min(1.0));
+
         let row_id = egui::Id::new(("row", todo.id));
         // Reserved now, filled in once the row's real height is known: the
         // hover surface has to sit behind everything the row draws.
@@ -1011,6 +1507,10 @@ impl Flodo {
 
         let resp = ui
             .scope(|ui| {
+                if let Some(t) = arrival {
+                    // Fades in over the first fifth of the glow.
+                    ui.multiply_opacity((t * 5.0).min(1.0));
+                }
                 ui.horizontal_top(|ui| {
                     // Left gutter: drag grip on hover, then the checkbox.
                     //
@@ -1042,8 +1542,9 @@ impl Flodo {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                     }
 
-                    let (box_r, box_resp) =
-                        ui.allocate_exact_size(Vec2::splat(ui::ICON), egui::Sense::click());
+                    let (box_r, _) =
+                        ui.allocate_exact_size(Vec2::splat(ui::ICON), egui::Sense::hover());
+                    let box_resp = ui.interact(box_r, checkbox_id(todo.id), egui::Sense::click());
                     let checked =
                         ui.ctx()
                             .animate_bool_with_time(row_id.with("done"), todo.done, 0.16);
@@ -1110,13 +1611,22 @@ impl Flodo {
                                                 .sense(egui::Sense::click())
                                                 .selectable(false),
                                         );
-                                        if todo.done {
+                                        // Starts at whatever the row already
+                                        // is, so only a fresh check-off
+                                        // sweeps.
+                                        let crossed = ui.ctx().animate_bool_with_time(
+                                            row_id.with("strike"),
+                                            todo.done,
+                                            0.22,
+                                        );
+                                        if crossed > 0.0 {
                                             ui::strike(
                                                 ui.painter(),
                                                 &galley,
                                                 resp.rect.left_top(),
                                                 p.muted,
                                                 size,
+                                                crossed,
                                             );
                                         }
                                         if resp.clicked() {
@@ -1255,25 +1765,46 @@ impl Flodo {
             .is_some_and(|r| r.contains_pointer())
             || dragging;
         let active = editing_title || editing_body;
-        let t = ui
-            .ctx()
-            .animate_bool_with_time(row_id.with("lit"), lit || active, 0.10);
+        let t =
+            ui.ctx()
+                .animate_bool_with_time(row_id.with("lit"), lit || active || selected, 0.10);
+        let rect = resp.rect.expand2(Vec2::new(5.0, 3.0));
+        let mut behind = Vec::new();
         if t > 0.01 {
-            let rect = resp.rect.expand2(Vec2::new(5.0, 3.0));
             let fill = if active { p.surface } else { p.surface_hover };
-            ui.painter().set(
-                backdrop,
-                egui::epaint::RectShape::filled(rect, ROW_RADIUS, fill.gamma_multiply(t)),
+            behind.push(egui::Shape::from(egui::epaint::RectShape::filled(
+                rect,
+                ROW_RADIUS,
+                fill.gamma_multiply(t),
+            )));
+        }
+        if let Some(a) = arrival {
+            // Where a new row landed: an accent wash that ebbs away.
+            let glow = (1.0 - a).powi(2) * 0.22;
+            behind.push(egui::Shape::from(egui::epaint::RectShape::filled(
+                rect,
+                ROW_RADIUS,
+                p.accent.gamma_multiply(glow),
+            )));
+        }
+        if t > 0.01 && (active || selected) {
+            // A quiet accent edge on whatever you're typing into, or the row
+            // the keyboard is on, so a long list never leaves you hunting for
+            // where you are.
+            let bar = egui::Rect::from_min_size(
+                rect.left_top() + Vec2::new(0.0, 2.0),
+                Vec2::new(2.0, (rect.height() - 4.0).max(0.0)),
             );
-            if active {
-                // A quiet accent edge on whatever you're typing into, so a long
-                // list never leaves you hunting for the caret.
-                let bar = egui::Rect::from_min_size(
-                    rect.left_top() + Vec2::new(0.0, 2.0),
-                    Vec2::new(2.0, (rect.height() - 4.0).max(0.0)),
-                );
-                ui.painter().rect_filled(bar, 1, p.accent.gamma_multiply(t));
-            }
+            let weight = if active { 1.0 } else { 0.6 };
+            behind.push(egui::Shape::from(egui::epaint::RectShape::filled(
+                bar,
+                1,
+                p.accent.gamma_multiply(t * weight),
+            )));
+        }
+        ui.painter().set(backdrop, egui::Shape::Vec(behind));
+        if selected && self.scroll_to_cursor {
+            ui.scroll_to_rect(rect, None);
         }
 
         // Register the row rect under a stable id so the *next* frame knows
@@ -1445,6 +1976,18 @@ impl Flodo {
                             OPACITY_RANGE.0..=OPACITY_RANGE.1,
                         )
                         .show_value(false),
+                    )
+                    .changed()
+                {
+                    self.touch_settings();
+                }
+
+                if ui
+                    .checkbox(
+                        &mut self.settings.celebrate,
+                        egui::RichText::new("Celebrate check-offs")
+                            .color(p.muted)
+                            .size(size * 0.9),
                     )
                     .changed()
                 {
@@ -1677,6 +2220,7 @@ impl Flodo {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.composer_focus = true;
+        self.cursor = None;
     }
 
     /// The hotkey fires on an OS thread, so the UI has to be woken to notice.
@@ -1744,6 +2288,7 @@ impl Flodo {
             return;
         }
         let id = self.store.add(captured.title.clone());
+        self.arrived.insert(id, Instant::now());
         if !captured.body.is_empty() {
             if let Some(todo) = self.store.get_mut(id) {
                 todo.body = captured.body;
@@ -1752,11 +2297,7 @@ impl Flodo {
         self.touch_todos();
         // Not undoable: undo puts back something deleted, and nothing was.
         // The row is at the top of the list and one click from gone.
-        self.toast = Some(Toast {
-            message: format!("Captured “{}”", excerpt(&captured.title, 24)),
-            undoable: false,
-            at: Instant::now(),
-        });
+        self.say(format!("Captured “{}”", excerpt(&captured.title, 24)), None);
     }
 
     fn ensure_font_scan(&mut self, ctx: &egui::Context) {
@@ -1879,6 +2420,12 @@ impl eframe::App for Flodo {
             if bg.drag_started_by(egui::PointerButton::Primary) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
+            // A click on nothing lets go of the selected row, the way it
+            // would in any list: the keyboard should not keep acting on a row
+            // the pointer has moved on from.
+            if bg.clicked() {
+                self.cursor = None;
+            }
 
             self.title_bar(ui, &p);
 
@@ -1934,6 +2481,7 @@ impl eframe::App for Flodo {
         });
 
         self.toast_ui(&ctx, &p);
+        self.fireworks.paint(&ctx, &p, size);
 
         // Drafts are written back after drawing so the row closure can stay
         // an immutable borrow of the store.
@@ -1966,8 +2514,8 @@ impl Flodo {
 
         let size = self.settings.font_size;
         let message = toast.message.clone();
-        let undoable = toast.undoable && self.undo.is_some();
-        let mut undo = false;
+        let action = toast.action.filter(|a| self.toast_action_live(*a));
+        let mut act = false;
         let mut dismiss = false;
 
         egui::Area::new(egui::Id::new("toast"))
@@ -1987,10 +2535,14 @@ impl Flodo {
                                     .color(p.text.gamma_multiply(alpha))
                                     .size(size * 0.85),
                             );
-                            if undoable {
+                            if let Some(action) = action {
                                 ui.add_space(8.0);
-                                if ui::text_button(ui, p, "Undo", size * 0.85).clicked() {
-                                    undo = true;
+                                let word = match action {
+                                    ToastAction::Undo(_) => "Undo",
+                                    ToastAction::ClearCompleted => "Clear them",
+                                };
+                                if ui::text_button(ui, p, word, size * 0.85).clicked() {
+                                    act = true;
                                 }
                             }
                             ui.add_space(2.0);
@@ -2003,10 +2555,11 @@ impl Flodo {
                     });
             });
 
-        if undo {
-            self.undo_delete();
-        } else if dismiss {
-            self.toast = None;
+        match action.filter(|_| act) {
+            Some(ToastAction::Undo(_)) => self.undo_last(),
+            Some(ToastAction::ClearCompleted) => self.clear_completed(),
+            None if dismiss => self.toast = None,
+            None => {}
         }
     }
 
@@ -2135,8 +2688,13 @@ mod tests {
             composer_focus: false,
             show_settings: false,
             show_shortcuts: false,
-            undo: None,
+            undo: Vec::new(),
+            undo_seq: 0,
             toast: None,
+            cursor: None,
+            scroll_to_cursor: false,
+            fireworks: Fireworks::default(),
+            arrived: HashMap::new(),
             hint: None,
             dirty_todos: None,
             dirty_settings: None,
@@ -2328,5 +2886,212 @@ mod tests {
         assert!(!out.delete);
         let out = pass(&ctx, &app, &todo, button(slot, false));
         assert!(!out.delete);
+    }
+
+    // ------------------------------------------------ keyboard, paste, undo
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> RawInput {
+        RawInput {
+            modifiers,
+            ..input(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }])
+        }
+    }
+
+    /// One frame of shortcut handling, the way `ui` starts every frame.
+    fn shortcuts_pass(ctx: &egui::Context, app: &mut Flodo, raw: RawInput) {
+        let _ = ctx.run_ui(raw, |ui| app.handle_shortcuts(ui.ctx()));
+    }
+
+    fn press(ctx: &egui::Context, app: &mut Flodo, k: egui::Key) {
+        shortcuts_pass(ctx, app, key(k, egui::Modifiers::NONE));
+    }
+
+    /// A list of three, top to bottom: a, b, c.
+    fn abc() -> (Flodo, [u64; 3]) {
+        let mut app = app();
+        let c = app.store.add("c");
+        let b = app.store.add("b");
+        let a = app.store.add("a");
+        (app, [a, b, c])
+    }
+
+    #[test]
+    fn the_arrows_walk_the_list_and_space_checks_off() {
+        let ctx = ctx();
+        let (mut app, [a, b, _]) = abc();
+
+        press(&ctx, &mut app, egui::Key::ArrowDown);
+        assert_eq!(
+            app.cursor,
+            Some(a),
+            "down from nowhere lands on the top row"
+        );
+        press(&ctx, &mut app, egui::Key::ArrowDown);
+        assert_eq!(app.cursor, Some(b));
+
+        press(&ctx, &mut app, egui::Key::Space);
+        assert!(app.store.get(b).unwrap().done);
+        assert_eq!(app.cursor, Some(b), "the row stays selected when shown");
+
+        // Up past the top goes back to typing.
+        press(&ctx, &mut app, egui::Key::ArrowUp);
+        press(&ctx, &mut app, egui::Key::ArrowUp);
+        assert_eq!(app.cursor, None);
+        assert!(app.composer_focus);
+    }
+
+    #[test]
+    fn checking_off_a_hidden_row_hands_the_keyboard_to_the_next() {
+        let ctx = ctx();
+        let (mut app, [a, b, _]) = abc();
+        app.settings.hide_completed = true;
+        app.cursor = Some(a);
+        press(&ctx, &mut app, egui::Key::Space);
+        assert!(app.store.get(a).unwrap().done);
+        assert_eq!(app.cursor, Some(b));
+    }
+
+    #[test]
+    fn enter_edits_and_backspace_deletes_the_selected_row() {
+        let ctx = ctx();
+        let (mut app, [a, b, _]) = abc();
+        app.cursor = Some(a);
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert!(matches!(&app.editing, Some(e) if e.id == a && e.field == Field::Title));
+
+        app.editing = None;
+        press(&ctx, &mut app, egui::Key::Backspace);
+        assert!(app.store.get(a).is_none());
+        assert_eq!(app.cursor, Some(b), "the keyboard moves on to the next row");
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|t| matches!(t.action, Some(ToastAction::Undo(_)))));
+    }
+
+    #[test]
+    fn typing_with_nothing_focused_lands_in_the_composer() {
+        let ctx = ctx();
+        let (mut app, [a, ..]) = abc();
+        app.cursor = Some(a);
+        shortcuts_pass(
+            &ctx,
+            &mut app,
+            input(vec![
+                egui::Event::Text("h".into()),
+                egui::Event::Text("i".into()),
+            ]),
+        );
+        assert_eq!(app.composer, "hi");
+        assert!(app.composer_focus);
+        assert_eq!(app.cursor, None);
+    }
+
+    #[test]
+    fn a_pasted_list_adds_every_line_and_undoes_as_one() {
+        let ctx = ctx();
+        let mut app = app();
+        shortcuts_pass(
+            &ctx,
+            &mut app,
+            input(vec![egui::Event::Paste(
+                "- [ ] oat milk\n- [x] coffee\n- bread\n".into(),
+            )]),
+        );
+        let titles: Vec<_> = app.store.todos.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["oat milk", "coffee", "bread"]);
+        assert!(app.store.todos[1].done);
+        assert!(app.composer.is_empty(), "nothing leaked into the composer");
+
+        app.undo_last();
+        assert!(app.store.todos.is_empty());
+    }
+
+    #[test]
+    fn a_single_pasted_line_is_just_text() {
+        let ctx = ctx();
+        let mut app = app();
+        shortcuts_pass(
+            &ctx,
+            &mut app,
+            input(vec![egui::Event::Paste("just one\n".into())]),
+        );
+        assert!(app.store.todos.is_empty());
+        assert_eq!(app.composer, "just one");
+    }
+
+    #[test]
+    fn undo_walks_back_through_every_kind_of_change() {
+        let (mut app, [a, b, c]) = abc();
+        app.toggle(a);
+        app.delete(b);
+        app.toggle(c);
+        app.clear_completed();
+        assert_eq!(app.store.todos.len(), 0);
+
+        app.undo_last(); // the clear
+        assert_eq!(app.store.todos.len(), 2);
+        app.undo_last(); // c's check-off
+        assert!(!app.store.get(c).unwrap().done);
+        app.undo_last(); // b's delete
+        let order: Vec<_> = app.store.todos.iter().map(|t| t.id).collect();
+        assert_eq!(order, [a, b, c], "back where it was");
+        app.undo_last(); // a's check-off
+        assert!(!app.store.get(a).unwrap().done);
+        app.undo_last(); // nothing left: a no-op, not a panic
+    }
+
+    #[test]
+    fn a_toast_only_offers_undo_while_its_change_is_the_newest() {
+        let (mut app, [a, b, _]) = abc();
+        app.delete(a);
+        let action = app.toast.as_ref().and_then(|t| t.action).unwrap();
+        assert!(app.toast_action_live(action));
+        app.toggle(b);
+        assert!(
+            !app.toast_action_live(action),
+            "its Undo would now take back the check-off instead"
+        );
+    }
+
+    #[test]
+    fn cmd_shift_backspace_clears_completed_not_the_selected_row() {
+        let ctx = ctx();
+        let (mut app, [a, b, c]) = abc();
+        app.toggle(b);
+        app.cursor = Some(a);
+        shortcuts_pass(
+            &ctx,
+            &mut app,
+            key(
+                egui::Key::Backspace,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
+        );
+        let left: Vec<_> = app.store.todos.iter().map(|t| t.id).collect();
+        assert_eq!(left, [a, c]);
+    }
+
+    #[test]
+    fn finishing_the_list_offers_to_clear_it() {
+        let (mut app, [a, b, c]) = abc();
+        for id in [a, b] {
+            app.toggle(id);
+        }
+        assert!(app.toast.is_none());
+        app.toggle(c);
+        let toast = app.toast.as_ref().expect("the whole list is done");
+        assert_eq!(toast.message, "All 3 done");
+        assert_eq!(toast.action, Some(ToastAction::ClearCompleted));
+
+        // Taking one back makes that untrue, so the toast goes.
+        app.toggle(c);
+        assert!(app.toast.is_none());
     }
 }

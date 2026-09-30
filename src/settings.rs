@@ -175,6 +175,10 @@ pub struct Settings {
     pub hide_completed: bool,
     #[serde(default = "default_true")]
     pub always_on_top: bool,
+    /// The little burst a to-do gives off when it is checked off. On by
+    /// default; it is the reward for the one thing the app is for.
+    #[serde(default = "default_true")]
+    pub celebrate: bool,
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
     #[serde(default)]
@@ -218,6 +222,7 @@ impl Default for Settings {
             opacity: default_opacity(),
             hide_completed: false,
             always_on_top: true,
+            celebrate: true,
             hotkey: default_hotkey(),
             quick_capture: QuickCapture::default(),
             window: WindowState::default(),

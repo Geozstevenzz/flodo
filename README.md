@@ -31,9 +31,11 @@ intended to grow them.
 | Window | Frameless and always-on-top. Drag it by the title bar or anywhere that isn't a control; unpin it when it's in the way. |
 | Bodies | A to-do is one line, but can carry a collapsible markdown description underneath, including fenced code snippets. <kbd>⌘</kbd><kbd>⏎</kbd> or the chevron opens one. |
 | Appearance | Eight accent colours, light and dark, plus font, code font, text size, row spacing, and opacity. |
-| Keyboard | The composer keeps focus after <kbd>Enter</kbd>, so several to-dos can be added without using the mouse. Every shortcut is listed in the settings sheet, and the one for whatever the pointer is on appears in the title bar. |
+| Keyboard | The composer keeps focus after <kbd>Enter</kbd>, so several to-dos can be added without using the mouse. <kbd>↓</kbd> walks into the list, <kbd>Space</kbd> checks off, and typing anywhere goes to the composer. Every shortcut is listed in the settings sheet, and the one for whatever the pointer is on appears in the title bar. |
+| Paste | Paste a list — bullets, numbers, or `- [ ]` checkboxes — and every line becomes a to-do. |
+| Checking off | A small burst out of the checkbox, a bigger one for a run, and a proper one when the list is done. |
 | Quick capture | Double-tap <kbd>⇧</kbd> anywhere to summon Flodo and write down whatever text you had selected. Off by default; macOS only. |
-| Undo | A delete is announced and offered back for a few seconds, or with <kbd>⌘</kbd><kbd>Z</kbd>. |
+| Undo | Deletes, check-offs, clears and pastes all go back with <kbd>⌘</kbd><kbd>Z</kbd>, as many steps as you like. A delete is also announced and offered back for a few seconds. |
 | Size | A single binary, around 8 MB. No webview, no background service, no account. |
 | Storage | Two JSON files you can read, edit, and sync. |
 | Scripting | A CLI over the same list, and an optional Claude skill for agents. |
@@ -96,6 +98,48 @@ button appear. Deleting says so, and offers the to-do back for a few seconds:
 <img src="docs/images/undo.png" alt="A deleted to-do offered back by a small strip at the bottom of the window reading Deleted 'Book the dentist', with an Undo link" width="340">
 </div>
 
+Once anything is done, a quiet line under the list counts the completed ones
+and clears them in one click, <kbd>⌘</kbd><kbd>⇧</kbd><kbd>⌫</kbd> from the
+keyboard. That too goes back with <kbd>⌘</kbd><kbd>Z</kbd>.
+
+### Checking things off
+
+Ticking something off is the moment a to-do list exists for, so it gets a
+little ceremony: the line crosses itself out, and a burst in your accent
+colour comes out of the checkbox. Check several off in a row and the bursts
+grow, with a count of the run floating up beside them:
+
+<div align="center">
+<img src="docs/images/celebrate.png" alt="Two to-dos just checked off in a row, each with a burst of pink sparks around its checkbox and a small ×2 floating beside them" width="340">
+</div>
+
+Finish the whole list and the title-bar mark bursts too, and Flodo offers to
+clear the finished list away:
+
+<div align="center">
+<img src="docs/images/finale.png" alt="Every to-do checked off, with a large burst around the last checkbox, a ring out of the title-bar mark, and a toast reading All 3 done with a Clear them link" width="340">
+</div>
+
+It is all painted over the list rather than in it, so nothing moves under the
+cursor. **Celebrate check-offs** in the settings sheet turns it off.
+
+### Never reaching for the mouse
+
+The keyboard can do everything the pointer can:
+
+- <kbd>↓</kbd> from the composer steps into the list, and <kbd>↑</kbd> past
+  the top steps back out. The selected row carries the accent edge.
+- <kbd>Space</kbd> checks it off, <kbd>Enter</kbd> edits it,
+  <kbd>⌘</kbd><kbd>⏎</kbd> opens its description, <kbd>⌫</kbd> deletes it,
+  and <kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌘</kbd><kbd>↓</kbd> move it.
+- Just start typing. Wherever the keyboard is, letters land in the composer.
+- Paste a list and each line becomes a to-do, in order. Bullets, numbers and
+  checkboxes are stripped, and `- [x]` lines arrive already done. A single
+  line pastes as ordinary text.
+
+New rows glow briefly in the accent colour, so a pasted list, a quick capture,
+or an undone delete is easy to spot.
+
 An empty list is the one place Flodo explains itself, and then never again:
 
 <div align="center">
@@ -149,7 +193,7 @@ cargo test --test login -- --test-threads=1
 <img src="docs/images/settings.png" alt="The settings sheet showing accent swatches, appearance, font pickers and sliders" width="340">
 </div>
 
-Seven settings on one screen, opened with <kbd>⌘</kbd><kbd>,</kbd>.
+A handful of settings on one screen, opened with <kbd>⌘</kbd><kbd>,</kbd>.
 
 The accent colour tints the whole panel, not just the checkbox: background,
 surfaces, and borders all shift toward its hue at low saturation.
@@ -165,16 +209,20 @@ asserts WCAG AA for body text against the background.
 
 | Shortcut | Action |
 |---|---|
-| <kbd>Enter</kbd> | Add the to-do, keep focus for the next one |
+| <kbd>Enter</kbd> | Add the to-do and keep focus for the next one, or edit the selected one |
 | <kbd>⌘</kbd><kbd>⏎</kbd> | Add or edit the description, then come back |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Walk the list; up past the top returns to the composer |
+| <kbd>Space</kbd> | Check off the selected to-do |
+| <kbd>⌫</kbd> | Delete the selected to-do |
 | <kbd>⌘</kbd><kbd>N</kbd> | Jump to the composer |
 | <kbd>⌘</kbd><kbd>E</kbd> | Show / hide completed |
+| <kbd>⌘</kbd><kbd>⇧</kbd><kbd>⌫</kbd> | Clear completed |
 | <kbd>⌘</kbd><kbd>P</kbd> | Pin / unpin from always-on-top |
 | <kbd>⌘</kbd><kbd>,</kbd> | Settings |
-| <kbd>⌘</kbd><kbd>Z</kbd> | Undo the last delete |
-| <kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌘</kbd><kbd>↓</kbd> | Move the to-do you're editing |
+| <kbd>⌘</kbd><kbd>Z</kbd> | Undo the last change — delete, check-off, clear, or paste |
+| <kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌘</kbd><kbd>↓</kbd> | Move the selected or edited to-do |
 | <kbd>⌘</kbd><kbd>⌫</kbd> | Delete |
-| <kbd>Esc</kbd> | Stop editing, or close settings |
+| <kbd>Esc</kbd> | Stop editing, leave the list, clear the composer, or close settings |
 | <kbd>⌥</kbd><kbd>Space</kbd> | Summon or hide Flodo from anywhere |
 | <kbd>⇧</kbd> <kbd>⇧</kbd> | Summon, and keep the selected text — off by default, see below |
 
@@ -394,7 +442,7 @@ Three properties protect it:
 ## Development
 
 ```sh
-cargo test                                                  # 123 tests
+cargo test                                                  # 147 tests
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```

@@ -5,6 +5,7 @@
 
 mod app;
 mod capture;
+mod celebrate;
 mod cli;
 mod fonts;
 mod hotkey;
