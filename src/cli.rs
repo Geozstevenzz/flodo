@@ -165,10 +165,18 @@ pub struct Record {
     pub created_at: i64,
     pub completed_at: Option<i64>,
     pub importance: Importance,
+    pub flags: Vec<FlagRecord>,
 }
 
-impl From<&Todo> for Record {
-    fn from(t: &Todo) -> Self {
+#[derive(Debug, Serialize, PartialEq)]
+pub struct FlagRecord {
+    pub id: u64,
+    pub name: String,
+    pub color: [u8; 3],
+}
+
+impl From<(&Todo, &Store)> for Record {
+    fn from((t, store): (&Todo, &Store)) -> Self {
         Self {
             id: t.id,
             title: t.title.clone(),
@@ -177,6 +185,16 @@ impl From<&Todo> for Record {
             created_at: t.created_at,
             completed_at: t.completed_at,
             importance: t.importance,
+            flags: store
+                .flags
+                .iter()
+                .filter(|flag| t.flag_ids.contains(&flag.id))
+                .map(|flag| FlagRecord {
+                    id: flag.id,
+                    name: flag.name.clone(),
+                    color: flag.color,
+                })
+                .collect(),
         }
     }
 }
@@ -186,7 +204,7 @@ pub fn records(store: &Store, all: bool) -> Vec<Record> {
         .todos
         .iter()
         .filter(|t| all || !t.done)
-        .map(Record::from)
+        .map(|todo| Record::from((todo, store)))
         .collect()
 }
 
@@ -247,7 +265,7 @@ fn run_inner(cmd: Command) -> Result<String, String> {
                 t.body = b;
             }
             store::save_todos_strict(&store)?;
-            let rec = Record::from(store.get(id).expect("just added"));
+            let rec = Record::from((store.get(id).expect("just added"), &store));
             if json {
                 let s = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
                 Ok(format!("{s}\n"))
@@ -458,6 +476,9 @@ mod tests {
     fn json_output_has_a_stable_shape() {
         let mut s = sample();
         s.todos[0].importance = Importance::High;
+        let todo_id = s.todos[0].id;
+        let flag = s.create_flag("Work", [10, 20, 30]).unwrap();
+        s.set_flag(todo_id, flag, true);
         let json = serde_json::to_value(records(&s, true)).unwrap();
         let first = &json[0];
         for key in [
@@ -468,10 +489,14 @@ mod tests {
             "created_at",
             "completed_at",
             "importance",
+            "flags",
         ] {
             assert!(first.get(key).is_some(), "missing {key} in {first}");
         }
         assert_eq!(first["importance"], "high");
+        assert_eq!(first["flags"][0]["id"], flag);
+        assert_eq!(first["flags"][0]["name"], "Work");
+        assert_eq!(first["flags"][0]["color"], serde_json::json!([10, 20, 30]));
         // Internal-only fields must never leak into the CLI contract.
         for key in ["expanded", "extra", "version"] {
             assert!(first.get(key).is_none(), "{key} leaked into CLI output");

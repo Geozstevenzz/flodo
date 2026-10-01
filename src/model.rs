@@ -49,6 +49,15 @@ impl Importance {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomFlag {
+    pub id: u64,
+    pub name: String,
+    pub color: [u8; 3],
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: u64,
     pub title: String,
@@ -64,6 +73,8 @@ pub struct Todo {
     pub expanded: bool,
     #[serde(default)]
     pub importance: Importance,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flag_ids: Vec<u64>,
     /// Catches keys written by a newer version so we round-trip instead of
     /// destroying them.
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
@@ -81,6 +92,7 @@ impl Todo {
             completed_at: None,
             expanded: false,
             importance: Importance::None,
+            flag_ids: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -96,6 +108,8 @@ pub struct Store {
     pub version: u32,
     #[serde(default)]
     pub todos: Vec<Todo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<CustomFlag>,
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
 }
@@ -105,12 +119,81 @@ impl Default for Store {
         Self {
             version: STORE_VERSION,
             todos: Vec::new(),
+            flags: Vec::new(),
             extra: Map::new(),
         }
     }
 }
 
 impl Store {
+    fn flag_name(&self, name: &str, editing: Option<u64>) -> Result<String, &'static str> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Enter a flag name.");
+        }
+        if name.chars().count() > 40 || name.chars().any(char::is_control) {
+            return Err("Use a single-line name of at most 40 characters.");
+        }
+        if self
+            .flags
+            .iter()
+            .any(|flag| Some(flag.id) != editing && flag.name.to_lowercase() == name.to_lowercase())
+        {
+            return Err("A flag with that name already exists.");
+        }
+        Ok(name.to_owned())
+    }
+
+    pub fn create_flag(&mut self, name: &str, color: [u8; 3]) -> Result<u64, &'static str> {
+        let name = self.flag_name(name, None)?;
+        let id = (now_millis() << 12).max(
+            self.flags
+                .iter()
+                .map(|flag| flag.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
+        self.flags.push(CustomFlag {
+            id,
+            name,
+            color,
+            extra: Map::new(),
+        });
+        Ok(id)
+    }
+
+    pub fn update_flag(&mut self, id: u64, name: &str, color: [u8; 3]) -> Result<(), &'static str> {
+        let name = self.flag_name(name, Some(id))?;
+        let flag = self
+            .flags
+            .iter_mut()
+            .find(|flag| flag.id == id)
+            .ok_or("This flag no longer exists.")?;
+        flag.name = name;
+        flag.color = color;
+        Ok(())
+    }
+
+    pub fn delete_flag(&mut self, id: u64) {
+        self.flags.retain(|flag| flag.id != id);
+        for todo in &mut self.todos {
+            todo.flag_ids.retain(|flag_id| *flag_id != id);
+        }
+    }
+
+    pub fn set_flag(&mut self, todo_id: u64, flag_id: u64, assigned: bool) {
+        if !self.flags.iter().any(|flag| flag.id == flag_id) {
+            return;
+        }
+        if let Some(todo) = self.get_mut(todo_id) {
+            todo.flag_ids.retain(|id| *id != flag_id);
+            if assigned {
+                todo.flag_ids.push(flag_id);
+            }
+        }
+    }
+
     /// Monotonic and unique: timestamp-derived so ids stay meaningful across
     /// sessions, but always at least `max_existing + 1` so a clock that jumps
     /// backwards can never produce a collision.
@@ -153,7 +236,10 @@ impl Store {
         Some((ix, self.todos.remove(ix)))
     }
 
-    pub fn restore(&mut self, index: usize, todo: Todo) {
+    pub fn restore(&mut self, index: usize, mut todo: Todo) {
+        // A flag may have been deleted while this todo was in the undo stack.
+        todo.flag_ids
+            .retain(|id| self.flags.iter().any(|flag| flag.id == *id));
         let ix = index.min(self.todos.len());
         self.todos.insert(ix, todo);
     }
@@ -301,6 +387,56 @@ pub fn parse_paste(text: &str) -> Vec<PastedItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_flags_survive_legacy_roundtrip_and_cli_style_mutations() {
+        let mut store: Store = serde_json::from_str(r#"{"version":1,"todos":[{"id":7,"title":"Keep me","body":"notes","future":true}],"futureStore":42}"#).unwrap();
+        assert!(store.flags.is_empty());
+        assert!(store.todos[0].flag_ids.is_empty());
+        let id = store.create_flag("  Work  ", [1, 2, 3]).unwrap();
+        store.set_flag(7, id, true);
+        store.set_flag(7, id, true);
+        store.todos[0].importance = Importance::High;
+        store.toggle(7);
+        let restored: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(restored.flags[0].name, "Work");
+        assert_eq!(restored.flags[0].color, [1, 2, 3]);
+        assert_eq!(restored.todos[0].flag_ids, vec![id]);
+        assert_eq!(restored.todos[0].importance, Importance::High);
+        assert_eq!(restored.todos[0].body, "notes");
+        assert_eq!(restored.todos[0].extra["future"], true);
+        assert_eq!(restored.extra["futureStore"], 42);
+    }
+
+    #[test]
+    fn custom_flags_validate_names_and_clear_assignments_on_delete_and_undo() {
+        let mut store = Store::default();
+        let a = store.add("a");
+        let b = store.add("b");
+        assert!(store.create_flag("  ", [0; 3]).is_err());
+        assert!(store.create_flag("two\nlines", [0; 3]).is_err());
+        assert!(store.create_flag(&"x".repeat(41), [0; 3]).is_err());
+        let work = store.create_flag("Work", [1, 2, 3]).unwrap();
+        assert!(store.create_flag(" work ", [0; 3]).is_err());
+        let personal = store.create_flag("Personal", [4, 5, 6]).unwrap();
+        assert!(store.update_flag(work, "PERSONAL", [0; 3]).is_err());
+        store.update_flag(work, " Office ", [7, 8, 9]).unwrap();
+        assert_eq!(store.flags[0].name, "Office");
+        assert_eq!(store.flags[0].color, [7, 8, 9]);
+        store.set_flag(a, work, true);
+        store.set_flag(a, personal, true);
+        store.set_flag(b, work, true);
+        store.set_flag(a, work, false);
+        assert_eq!(store.get(a).unwrap().flag_ids, vec![personal]);
+        let (index, removed) = store.remove(b).unwrap();
+        store.delete_flag(work);
+        store.restore(index, removed);
+        assert!(store.get(b).unwrap().flag_ids.is_empty());
+        store.delete_flag(personal);
+        assert!(store.get(a).unwrap().flag_ids.is_empty());
+        assert_eq!(store.visible_ids(false), vec![b, a]);
+    }
 
     fn store_with(n: usize) -> Store {
         let mut s = Store::default();

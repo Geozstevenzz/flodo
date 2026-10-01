@@ -173,6 +173,42 @@ pub fn checkbox(painter: &egui::Painter, rect: Rect, t: f32, hovered: bool, p: &
     }
 }
 
+/// The number follows visible order; completion keeps a contrasting check badge.
+pub fn numbered_checkbox(
+    painter: &egui::Painter,
+    rect: Rect,
+    t: f32,
+    hovered: bool,
+    number: usize,
+    p: &Palette,
+) {
+    let c = rect.center();
+    let t = t.clamp(0.0, 1.0);
+    painter.circle_stroke(
+        c,
+        11.0,
+        Stroke::new(1.5, if hovered { p.accent } else { p.muted }),
+    );
+    if t > 0.0 {
+        painter.circle_filled(c, 11.0, p.accent.gamma_multiply(t));
+    }
+    let text = number.to_string();
+    let size = (21.0 / (text.len() as f32 * 0.62)).min(12.0);
+    painter.text(
+        c,
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(size),
+        if t > 0.5 { p.on_accent } else { p.text },
+    );
+    if t > 0.5 {
+        let badge = c + Vec2::new(8.0, 8.0);
+        painter.circle_filled(badge, 5.0, p.accent);
+        painter.circle_stroke(badge, 5.0, Stroke::new(1.0, p.bg));
+        check_glyph(painter, badge, 5.0, p.on_accent);
+    }
+}
+
 /// The title-bar mark: a ring that fills clockwise as the list gets done.
 /// Empty list, and it is just a dot — there is no progress to show yet.
 pub fn progress_ring(painter: &egui::Painter, rect: Rect, done: usize, total: usize, p: &Palette) {
@@ -243,6 +279,14 @@ pub fn close(painter: &egui::Painter, rect: Rect, color: Color32) {
     let s = 4.0;
     painter.line_segment([c + Vec2::new(-s, -s), c + Vec2::new(s, s)], stroke(color));
     painter.line_segment([c + Vec2::new(s, -s), c + Vec2::new(-s, s)], stroke(color));
+}
+
+pub fn minimize(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    painter.line_segment(
+        [c + Vec2::new(-5.0, 0.0), c + Vec2::new(5.0, 0.0)],
+        stroke(color),
+    );
 }
 
 /// An eye, open when completed todos are visible and struck through when not.

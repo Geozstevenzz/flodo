@@ -33,6 +33,27 @@ impl Appearance {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    #[default]
+    Manual,
+    HighFirst,
+    LowFirst,
+}
+
+impl SortOrder {
+    pub const ALL: [Self; 3] = [Self::Manual, Self::HighFirst, Self::LowFirst];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual order",
+            Self::HighFirst => "High importance first",
+            Self::LowFirst => "Low importance first",
+        }
+    }
+}
+
 /// A chosen font, remembered by path + face index so startup never has to
 /// enumerate the system font database.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -173,6 +194,8 @@ pub struct Settings {
     pub opacity: f32,
     #[serde(default)]
     pub hide_completed: bool,
+    #[serde(default)]
+    pub sort_order: SortOrder,
     #[serde(default = "default_true")]
     pub always_on_top: bool,
     /// The little burst a to-do gives off when it is checked off. On by
@@ -221,6 +244,7 @@ impl Default for Settings {
             spacing: default_spacing(),
             opacity: default_opacity(),
             hide_completed: false,
+            sort_order: SortOrder::default(),
             always_on_top: true,
             celebrate: true,
             hotkey: default_hotkey(),
@@ -283,6 +307,18 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_settings_keep_manual_order_and_remember_importance_sort() {
+        let mut settings: Settings = serde_json::from_str(r#"{"accent":"teal"}"#).unwrap();
+        assert_eq!(settings.sort_order, SortOrder::Manual);
+        for order in SortOrder::ALL {
+            settings.sort_order = order;
+            let restored: Settings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(restored.sort_order, order);
+        }
+    }
 
     #[test]
     fn defaults_are_sane() {

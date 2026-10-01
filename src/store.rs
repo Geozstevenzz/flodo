@@ -263,6 +263,8 @@ mod tests {
             s.add("watch it pass");
             let id = s.todos[0].id;
             s.toggle(id);
+            let flag = s.create_flag("Work", [10, 20, 30]).unwrap();
+            s.set_flag(id, flag, true);
             s.todos[1].body = "```rust\nfn main() {}\n```".into();
             save_todos(&s);
 
@@ -271,6 +273,8 @@ mod tests {
             assert_eq!(loaded.todos.len(), 2);
             assert_eq!(loaded.todos[0].id, id);
             assert!(loaded.todos[0].done);
+            assert_eq!(loaded.todos[0].flag_ids, vec![flag]);
+            assert_eq!(loaded.flags, s.flags);
             assert!(loaded.todos[1].body.contains("fn main"));
         });
     }

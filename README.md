@@ -22,7 +22,8 @@ Flodo is a frameless panel that floats above your other windows. It holds one
 list: add a to-do, check it off, and hide the completed ones when you want to.
 
 This fork of [michellemayes/flodo](https://github.com/michellemayes/flodo)
-adds importance flags, larger resize targets, stable drag reordering, and npm installation.
+adds importance and custom flags, larger resize targets, stable drag reordering,
+a minimize button, and npm installation.
 
 ## What it does
 
@@ -31,7 +32,11 @@ adds importance flags, larger resize targets, stable drag reordering, and npm in
 | Window | Frameless and always-on-top. Drag it by the title bar or anywhere that isn't a control; unpin it when it's in the way. |
 | Resize | Grab any edge or corner. Resize targets cover eight logical pixels along each edge, with longer corner targets. |
 | Importance | Click a row's flag to choose no flag, low (blue), medium (amber), or high (red). Flags persist without changing your chosen row order. |
+| Custom flags | Create named flags with your own colors from Settings or a row's flag menu. Assign multiple flags to a to-do; rename, recolor, or delete them from the flag manager. |
+| Minimize | Use the minus button in the title bar to minimize the window. Restore it through your taskbar or Dock. |
 | Reordering | Drag the row handle to a drop indicator, then release. Rows stay still during the gesture. |
+| Sorting | Choose Manual order, High importance first, or Low importance first. Unflagged items stay last; switching to Manual order restores your drag order. |
+| Numbering | Checkbox circles show each item's visible position, starting at 1. Numbers update when you sort, reorder, or hide completed items; clicking still checks an item off. |
 | Bodies | A to-do is one line, but can carry a collapsible markdown description underneath, including fenced code snippets. <kbd>⌘</kbd><kbd>⏎</kbd> or the chevron opens one. |
 | Appearance | Eight accent colours, light and dark, plus font, code font, text size, row spacing, and opacity. |
 | Keyboard | The composer keeps focus after <kbd>Enter</kbd>, so several to-dos can be added without using the mouse. <kbd>↓</kbd> walks into the list, <kbd>Space</kbd> checks off, and typing anywhere goes to the composer. Every shortcut is listed in the settings sheet, and the one for whatever the pointer is on appears in the title bar. |
@@ -55,6 +60,8 @@ flodo
 ```
 
 The package is published at [npmjs.com/package/flodo](https://www.npmjs.com/package/flodo).
+To update, quit Flodo, run `npm install -g flodo@latest`, then launch `flodo` again.
+Check the installed version with `flodo --version`.
 For a project-local install, use `npm install flodo`, then launch with `npx flodo`.
 Supports Windows x64, Linux x64 with glibc, and macOS Intel/Apple Silicon.
 The package includes the compiled applications, so installing needs no Rust
@@ -72,6 +79,22 @@ that environment variable set when launching the fork.
 
 Quit the old Flodo before launching the fork so two open copies cannot overwrite
 each other's changes. See **Your data** below for the macOS and Linux locations.
+
+### Custom flags
+
+Open a to-do's flag menu and choose **Manage custom flags**, or open the same
+manager from Settings. Give each flag a name and color, then select flags in
+a to-do's flag menu. A to-do can have several custom flags as well as an
+importance level. Assigned flags appear below its title.
+
+Renaming or recoloring a flag updates it on every assigned to-do. Deleting a
+flag removes its assignments without deleting any to-dos. Custom flags are
+saved in the same `todos.json` file as the list.
+
+Use the importance sort control to put high importance items at the top or
+bottom of the flagged items. Items without an importance flag stay last, and
+items with the same importance keep their manual order. Switch back to
+**Manual order** to rearrange items by dragging.
 
 ### Standalone download
 
