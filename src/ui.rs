@@ -10,6 +10,37 @@ pub const ICON: f32 = 16.0;
 /// Side of the square an [`icon_button`] occupies: the glyph plus its padding.
 pub const BUTTON: f32 = ICON + 6.0;
 
+pub fn importance_flag(
+    painter: &egui::Painter,
+    rect: Rect,
+    importance: crate::model::Importance,
+    p: &Palette,
+) {
+    use crate::model::Importance;
+    let color = match importance {
+        Importance::None => p.muted.gamma_multiply(0.45),
+        Importance::Low => Color32::from_rgb(70, 160, 225),
+        Importance::Medium => Color32::from_rgb(225, 160, 35),
+        Importance::High => Color32::from_rgb(230, 85, 90),
+    };
+    let origin = rect.center() - Vec2::new(5.0, 6.0);
+    painter.line_segment([origin, origin + Vec2::new(0.0, 13.0)], stroke(color));
+    let points = vec![
+        origin,
+        origin + Vec2::new(10.0, 3.5),
+        origin + Vec2::new(0.0, 7.0),
+    ];
+    if importance == Importance::None {
+        painter.add(egui::Shape::closed_line(points, stroke(color)));
+    } else {
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
 fn stroke(c: Color32) -> Stroke {
     Stroke::new(1.4, c)
 }

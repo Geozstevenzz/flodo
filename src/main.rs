@@ -16,6 +16,7 @@ mod settings;
 mod store;
 mod theme;
 mod ui;
+mod window;
 
 use eframe::egui;
 use std::process::ExitCode;
@@ -61,7 +62,7 @@ fn run_gui() -> eframe::Result<()> {
         .with_app_id("flodo")
         .with_icon(icon)
         .with_inner_size([settings.window.w, settings.window.h])
-        .with_min_inner_size([260.0, 180.0])
+        .with_min_inner_size(window::MIN_SIZE)
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(true)

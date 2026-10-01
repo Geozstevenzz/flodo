@@ -6,8 +6,8 @@
 
 A small floating to-do list for macOS, Linux, and Windows.
 
-[![CI](https://github.com/michellemayes/flodo/actions/workflows/ci.yml/badge.svg)](https://github.com/michellemayes/flodo/actions/workflows/ci.yml)
-[![Release](https://github.com/michellemayes/flodo/actions/workflows/release.yml/badge.svg)](https://github.com/michellemayes/flodo/actions/workflows/release.yml)
+[![CI](https://github.com/Geozstevenzz/flodo/actions/workflows/ci.yml/badge.svg)](https://github.com/Geozstevenzz/flodo/actions/workflows/ci.yml)
+[![Release](https://github.com/Geozstevenzz/flodo/actions/workflows/release.yml/badge.svg)](https://github.com/Geozstevenzz/flodo/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-stable-orange.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
@@ -21,14 +21,17 @@ A small floating to-do list for macOS, Linux, and Windows.
 Flodo is a frameless panel that floats above your other windows. It holds one
 list: add a to-do, check it off, and hide the completed ones when you want to.
 
-It has no tags, priorities, due dates, projects, or sub-tasks, and is not
-intended to grow them.
+This fork of [michellemayes/flodo](https://github.com/michellemayes/flodo)
+adds importance flags, larger resize targets, stable drag reordering, and npm installation.
 
 ## What it does
 
 | Area | Detail |
 |---|---|
 | Window | Frameless and always-on-top. Drag it by the title bar or anywhere that isn't a control; unpin it when it's in the way. |
+| Resize | Grab any edge or corner. Resize targets cover eight logical pixels along each edge, with longer corner targets. |
+| Importance | Click a row's flag to choose no flag, low (blue), medium (amber), or high (red). Flags persist without changing your chosen row order. |
+| Reordering | Drag the row handle to a drop indicator, then release. Rows stay still during the gesture. |
 | Bodies | A to-do is one line, but can carry a collapsible markdown description underneath, including fenced code snippets. <kbd>⌘</kbd><kbd>⏎</kbd> or the chevron opens one. |
 | Appearance | Eight accent colours, light and dark, plus font, code font, text size, row spacing, and opacity. |
 | Keyboard | The composer keeps focus after <kbd>Enter</kbd>, so several to-dos can be added without using the mouse. <kbd>↓</kbd> walks into the list, <kbd>Space</kbd> checks off, and typing anywhere goes to the composer. Every shortcut is listed in the settings sheet, and the one for whatever the pointer is on appears in the title bar. |
@@ -42,7 +45,36 @@ intended to grow them.
 
 ## Install
 
-Download the latest [release](../../releases).
+### npm
+
+Requires Node.js 20 or newer. Install and launch:
+
+```sh
+npm install -g flodo
+flodo
+```
+
+For a project-local install, use `npm install flodo`, then `npx flodo`.
+Supports Windows x64, Linux x64 with glibc, and macOS Intel/Apple Silicon.
+The package includes the compiled applications, so installing needs no Rust
+toolchain or install scripts. Linux requires a desktop session and the usual
+OpenGL, X11 or Wayland runtime libraries.
+
+### Keep your existing to-dos
+
+The fork uses the original Flodo data directory and reads existing `todos.json`
+and `settings.json` directly. On Windows this is `%APPDATA%\Flodo\`.
+Existing items start with no importance flag; their IDs, order, completion state,
+descriptions and unknown fields are preserved. Installation and uninstallation
+do not write to your data directory. If you use a custom `FLODO_STATE_DIR`, keep
+that environment variable set when launching the fork.
+
+Quit the old Flodo before launching the fork so two open copies cannot overwrite
+each other's changes. See **Your data** below for the macOS and Linux locations.
+
+### Standalone download
+
+Download the latest [release](https://github.com/Geozstevenzz/flodo/releases).
 
 **macOS** — unzip and drag `Flodo.app` to Applications. Builds are ad-hoc signed
 but not notarized, so the first launch needs right-click → **Open**, or:
@@ -56,7 +88,7 @@ xattr -dr com.apple.quarantine /Applications/Flodo.app
 **From source** — needs a stable Rust toolchain:
 
 ```sh
-git clone https://github.com/michellemayes/flodo
+git clone https://github.com/Geozstevenzz/flodo
 cd flodo
 cargo run --release
 ```

@@ -2,3 +2,7 @@
 /dist
 **/*.rs.bk
 .DS_Store
+/native
+/node_modules
+/*.tgz
+/.private

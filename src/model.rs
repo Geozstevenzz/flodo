@@ -25,6 +25,29 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Importance {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl Importance {
+    pub const ALL: [Self; 4] = [Self::None, Self::Low, Self::Medium, Self::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "No flag",
+            Self::Low => "Low importance",
+            Self::Medium => "Medium importance",
+            Self::High => "High importance",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Todo {
     pub id: u64,
@@ -39,6 +62,8 @@ pub struct Todo {
     pub completed_at: Option<i64>,
     #[serde(default)]
     pub expanded: bool,
+    #[serde(default)]
+    pub importance: Importance,
     /// Catches keys written by a newer version so we round-trip instead of
     /// destroying them.
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
@@ -55,6 +80,7 @@ impl Todo {
             created_at: now_secs(),
             completed_at: None,
             expanded: false,
+            importance: Importance::None,
             extra: Map::new(),
         }
     }
@@ -421,6 +447,27 @@ mod tests {
         assert_eq!(s.version, STORE_VERSION);
         let t = &s.todos[0];
         assert!(!t.done && !t.expanded && t.body.is_empty() && t.completed_at.is_none());
+        assert_eq!(t.importance, Importance::None);
+    }
+
+    #[test]
+    fn importance_round_trips_without_losing_legacy_todos_or_unknown_fields() {
+        let legacy = r#"{"version":1,"todos":[{"id":7,"title":"Old task","body":"notes","done":true,"created_at":42,"completed_at":43,"expanded":true,"future":"kept"},{"id":8,"title":"Next"}],"futureStore":true}"#;
+        let mut store: Store = serde_json::from_str(legacy).unwrap();
+        assert!(store.todos.iter().all(|t| t.importance == Importance::None));
+        let before = store.clone();
+        for importance in Importance::ALL {
+            store.todos[0].importance = importance;
+            let encoded = serde_json::to_string(&store).unwrap();
+            let loaded: Store = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(loaded.todos[0].importance, importance);
+            let mut old_task = loaded.todos[0].clone();
+            old_task.importance = Importance::None;
+            assert_eq!(old_task, before.todos[0]);
+            assert_eq!(loaded.todos[1], before.todos[1]);
+            assert_eq!(loaded.extra, before.extra);
+            assert_eq!(loaded.version, 1);
+        }
     }
 
     #[test]

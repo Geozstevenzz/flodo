@@ -176,10 +176,30 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.preflight.outputs.tag }}
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Assemble npm package
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          mkdir -p native/win32 native/linux native/darwin
+          unzip "artifacts/flodo-$TAG-windows-x86_64.zip" -d native/win32
+          tar xzf "artifacts/flodo-$TAG-linux-x86_64.tar.gz" -C native/linux
+          unzip "artifacts/flodo-$TAG-macos-universal.zip" -d native/darwin
+          chmod +x native/linux/flodo native/darwin/Flodo.app/Contents/MacOS/flodo
+          npm test
+          npm pack --pack-destination artifacts
 
       - name: Checksums
         run: |

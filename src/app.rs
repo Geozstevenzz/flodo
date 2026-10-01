@@ -2,7 +2,7 @@
 
 use crate::celebrate::Fireworks;
 use crate::markdown::{self, FAMILY_MONO, FAMILY_UI};
-use crate::model::{self, Store, Todo};
+use crate::model::{self, Importance, Store, Todo};
 use crate::settings::{
     Appearance, FontChoice, Settings, FONT_SIZE_RANGE, OPACITY_RANGE, SPACING_RANGE,
 };
@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
 const TITLE_BAR_H: f32 = 30.0;
-/// Right-hand column of a row: the description chevron, the delete button that
-/// appears next to it on hover, and the gap separating the pair from the
-/// title. Both slots are reserved on every row — hovering must not push either
+/// Right-hand column of a row: the importance flag, description chevron,
+/// delete button and the gap separating them from the title. All slots are
+/// reserved on every row — hovering must not push any
 /// of them over the title, or move the chevron out from under the pointer
-/// reaching for it. The two icons sit flush against each other; each already
+/// reaching for it. The three icons sit flush against each other; each already
 /// carries its own padding.
-const GUTTER: f32 = ui::ICON + ui::BUTTON + 8.0;
+const GUTTER: f32 = ui::ICON + 2.0 * ui::BUTTON + 8.0;
 const WINDOW_RADIUS: u8 = 12;
 const ROW_RADIUS: u8 = 7;
 /// How long a deleted to-do stays offered back before the toast fades.
@@ -133,9 +133,8 @@ fn excerpt(title: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// Which row a drag is currently over, from the row rectangles of the previous
-/// frame. Measuring the real rows — rather than assuming every row is one line
-/// tall — is what lets you drag past a to-do with an open description.
+/// Which row a drag is currently over. Measure real rows so an expanded
+/// description counts as one item regardless of its height.
 fn drop_target(rects: &[Option<egui::Rect>], y: f32) -> Option<usize> {
     let known = || {
         rects
@@ -1389,22 +1388,13 @@ impl Flodo {
         let mut remove: Option<u64> = None;
         let mut expand: Option<u64> = None;
         let mut edit: Option<(u64, Field)> = None;
-        let mut reorder: Option<(u64, usize)> = None;
+        let mut drag: Option<(u64, f32, bool)> = None;
+        let mut importance: Option<(u64, Importance)> = None;
         let mut draft: Option<String> = None;
 
-        // Where every row was last frame. A drag is resolved against these
-        // rather than an assumed row height, so rows with an open description
-        // are dragged over accurately instead of jumping several places.
-        let rects: Vec<Option<egui::Rect>> = visible
-            .iter()
-            .map(|id| {
-                ui.ctx()
-                    .read_response(egui::Id::new(("row", *id)))
-                    .map(|r| r.rect)
-            })
-            .collect();
+        let mut rects = Vec::with_capacity(visible.len());
 
-        for (row_ix, id) in visible.iter().copied().enumerate() {
+        for id in visible.iter().copied() {
             // Scoped so the immutable borrow of `store` ends before we write
             // the draft back below.
             let out = {
@@ -1413,6 +1403,7 @@ impl Flodo {
                 };
                 self.row(ui, p, todo)
             };
+            rects.push(out.rect);
             if out.toggle {
                 toggle = Some(id);
             }
@@ -1426,11 +1417,10 @@ impl Flodo {
                 edit = Some((id, f));
             }
             if let Some(y) = out.drag_y {
-                if let Some(ix) = drop_target(&rects, y) {
-                    if ix != row_ix {
-                        reorder = Some((id, ix));
-                    }
-                }
+                drag = Some((id, y, out.drag_stopped));
+            }
+            if let Some(value) = out.importance {
+                importance = Some((id, value));
             }
             if let Some(d) = out.draft {
                 draft = Some(d);
@@ -1469,12 +1459,33 @@ impl Flodo {
         if let Some(id) = remove {
             self.delete(id);
         }
-        if let Some((id, to)) = reorder {
-            // `to` indexes the visible list; translate back to store order.
-            let target = visible.get(to).copied().unwrap_or(id);
-            if let Some(ix) = self.store.index_of(target) {
-                self.store.move_to(id, ix);
+        if let Some((id, value)) = importance {
+            if let Some(todo) = self.store.get_mut(id) {
+                todo.importance = value;
                 self.touch_todos();
+            }
+        }
+        if let Some((id, y, released)) = drag {
+            if let (Some(from), Some(to)) = (
+                visible.iter().position(|item| *item == id),
+                drop_target(&rects, y),
+            ) {
+                if from != to {
+                    // Keep layout and grip identity fixed for the gesture.
+                    // Moving rows every frame makes hit targets jump under
+                    // the pointer, especially beside expanded descriptions.
+                    if let Some(rect) = rects[to] {
+                        let y = if to > from { rect.bottom() } else { rect.top() };
+                        ui.painter().hline(rect.x_range(), y, (2.0, p.accent));
+                    }
+                    if released && !ui.input(|i| i.key_down(egui::Key::Escape)) {
+                        if let Some(ix) = self.store.index_of(visible[to]) {
+                            self.store.move_to(id, ix);
+                            self.touch_todos();
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
             }
         }
     }
@@ -1506,7 +1517,7 @@ impl Flodo {
         let mut dragging = false;
 
         let resp = ui
-            .scope(|ui| {
+            .push_id(todo.id, |ui| {
                 if let Some(t) = arrival {
                     // Fades in over the first fifth of the glow.
                     ui.multiply_opacity((t * 5.0).min(1.0));
@@ -1523,17 +1534,18 @@ impl Flodo {
                         .read_response(row_id)
                         .is_some_and(|r| r.contains_pointer());
 
-                    let (grip_r, grip_resp) = ui.allocate_exact_size(
-                        Vec2::new(10.0, ui::ICON),
-                        egui::Sense::click_and_drag(),
-                    );
-                    dragging = grip_resp.dragged();
+                    let (grip_r, _) =
+                        ui.allocate_exact_size(Vec2::new(10.0, ui::ICON), egui::Sense::hover());
+                    let grip_resp = ui.interact(grip_r, row_id.with("grip"), egui::Sense::drag());
+                    dragging = grip_resp.dragged_by(egui::PointerButton::Primary);
+                    if dragging && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        ui.ctx().stop_dragging();
+                    }
                     if hovered || dragging {
                         ui::grip(ui.painter(), grip_r, p.muted.gamma_multiply(0.7));
                     }
-                    if dragging {
-                        // The list turns the pointer into a row, from the row
-                        // rectangles it measured last frame.
+                    out.drag_stopped = grip_resp.drag_stopped_by(egui::PointerButton::Primary);
+                    if dragging || out.drag_stopped {
                         if let Some(pos) = ui.ctx().pointer_interact_pos() {
                             out.drag_y = Some(pos.y);
                         }
@@ -1684,7 +1696,7 @@ impl Flodo {
                         });
                     });
 
-                    // Right gutter: the description chevron, delete on hover.
+                    // Right gutter: importance, description and delete.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                         // No gap between the two: `GUTTER` is budgeted for
                         // their bare widths, and the default 8pt would push the
@@ -1749,6 +1761,23 @@ impl Flodo {
                         if resp.clicked() {
                             out.toggle_expand = true;
                         }
+                        let (flag_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(ui::BUTTON), egui::Sense::hover());
+                        let flag =
+                            ui.interact(flag_rect, row_id.with("importance"), egui::Sense::click());
+                        ui::importance_flag(ui.painter(), flag_rect, todo.importance, p);
+                        ui::hint(ui.ctx(), &flag, ui::Action::new(todo.importance.label()));
+                        egui::Popup::menu(&flag).show(|ui| {
+                            for value in Importance::ALL {
+                                if ui
+                                    .selectable_label(todo.importance == value, value.label())
+                                    .clicked()
+                                {
+                                    out.importance = Some(value);
+                                    ui.close();
+                                }
+                            }
+                        });
                     });
                 });
             })
@@ -1810,6 +1839,7 @@ impl Flodo {
         // Register the row rect under a stable id so the *next* frame knows
         // whether it is hovered (immediate mode has no persistent widgets).
         ui.interact(resp.rect, row_id, egui::Sense::hover());
+        out.rect = Some(resp.rect);
 
         out
     }
@@ -1826,6 +1856,9 @@ struct RowOut {
     /// Where the pointer is while this row's grip is being dragged. The list
     /// owns the translation from a y to a position.
     drag_y: Option<f32>,
+    drag_stopped: bool,
+    rect: Option<egui::Rect>,
+    importance: Option<Importance>,
     draft: Option<String>,
 }
 
@@ -2482,6 +2515,7 @@ impl eframe::App for Flodo {
 
         self.toast_ui(&ctx, &p);
         self.fireworks.paint(&ctx, &p, size);
+        crate::window::resize_frame(ui);
 
         // Drafts are written back after drawing so the row closure can stay
         // an immutable borrow of the store.
@@ -2633,6 +2667,52 @@ mod tests {
     fn the_gap_between_two_rows_belongs_to_the_one_above() {
         let r = rows(&[20.0, 20.0]);
         assert_eq!(drop_target(&r, 22.0), Some(0));
+    }
+
+    #[test]
+    fn dragging_keeps_rows_still_until_release_and_moves_only_the_grabbed_item() {
+        let ctx = ctx();
+        let mut app = app();
+        let last = app.store.add("last");
+        let middle = app.store.add("middle");
+        let first = app.store.add("first");
+        let p = Palette::new(Accent::Purple, true);
+        let pass = |app: &mut Flodo, raw| {
+            let _ = ctx.run_ui(raw, |ui| app.list(ui, &p));
+        };
+        for _ in 0..3 {
+            pass(&mut app, input(vec![]));
+        }
+        let grip = ctx
+            .read_response(egui::Id::new(("row", first)).with("grip"))
+            .unwrap()
+            .rect
+            .center();
+        let last_rect = ctx
+            .read_response(egui::Id::new(("row", last)))
+            .unwrap()
+            .rect;
+        pass(&mut app, moved(grip));
+        pass(&mut app, button(grip, true));
+        let destination = Pos2::new(grip.x, last_rect.center().y);
+        for _ in 0..8 {
+            pass(&mut app, moved(destination));
+            assert_eq!(app.visible(), vec![first, middle, last]);
+            assert_eq!(
+                ctx.read_response(egui::Id::new(("row", last)))
+                    .unwrap()
+                    .rect,
+                last_rect
+            );
+            assert!(
+                app.dirty_todos.is_none(),
+                "hovering must not rewrite the store"
+            );
+        }
+        pass(&mut app, button(destination, false));
+        assert_eq!(app.visible(), vec![middle, last, first]);
+        pass(&mut app, input(vec![]));
+        assert_eq!(app.visible(), vec![middle, last, first]);
     }
 
     #[test]

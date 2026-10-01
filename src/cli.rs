@@ -4,7 +4,7 @@
 //! Arguments are parsed by hand rather than with `clap`, to keep the
 //! dependency list short.
 
-use crate::model::{Store, Todo};
+use crate::model::{Importance, Store, Todo};
 use crate::store;
 use serde::Serialize;
 use std::process::ExitCode;
@@ -164,6 +164,7 @@ pub struct Record {
     pub done: bool,
     pub created_at: i64,
     pub completed_at: Option<i64>,
+    pub importance: Importance,
 }
 
 impl From<&Todo> for Record {
@@ -175,6 +176,7 @@ impl From<&Todo> for Record {
             done: t.done,
             created_at: t.created_at,
             completed_at: t.completed_at,
+            importance: t.importance,
         }
     }
 }
@@ -454,12 +456,22 @@ mod tests {
 
     #[test]
     fn json_output_has_a_stable_shape() {
-        let s = sample();
+        let mut s = sample();
+        s.todos[0].importance = Importance::High;
         let json = serde_json::to_value(records(&s, true)).unwrap();
         let first = &json[0];
-        for key in ["id", "title", "body", "done", "created_at", "completed_at"] {
+        for key in [
+            "id",
+            "title",
+            "body",
+            "done",
+            "created_at",
+            "completed_at",
+            "importance",
+        ] {
             assert!(first.get(key).is_some(), "missing {key} in {first}");
         }
+        assert_eq!(first["importance"], "high");
         // Internal-only fields must never leak into the CLI contract.
         for key in ["expanded", "extra", "version"] {
             assert!(first.get(key).is_none(), "{key} leaked into CLI output");

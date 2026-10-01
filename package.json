@@ -1,0 +1,22 @@
+{
+  "name": "flodo",
+  "version": "0.2.0",
+  "description": "Floating desktop to-do list with importance flags and local data storage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Geozstevenzz/flodo.git"
+  },
+  "homepage": "https://github.com/Geozstevenzz/flodo#readme",
+  "bugs": "https://github.com/Geozstevenzz/flodo/issues",
+  "bin": { "flodo": "bin/flodo.cjs" },
+  "files": ["bin/", "native/", "docs/images/", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "os": ["win32", "darwin", "linux"],
+  "cpu": ["x64", "arm64"],
+  "scripts": {
+    "test": "node --test tests/launcher.test.cjs",
+    "prepack": "node scripts/check-native.cjs"
+  },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" }
+}
