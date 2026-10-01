@@ -47,16 +47,15 @@ adds importance flags, larger resize targets, stable drag reordering, and npm in
 
 ### npm
 
-Requires Node.js 20 or newer. The release archive is available now:
+Requires Node.js 20 or newer. Install and launch:
 
 ```sh
-npm install -g https://github.com/Geozstevenzz/flodo/releases/download/v0.2.0/flodo-0.2.0.tgz
+npm install -g flodo
 flodo
 ```
 
-Publication under the npm registry name `flodo` is pending account security-key
-verification. After publication, `npm install -g flodo` will also work.
-For a project-local install, omit `-g`, then launch with `npx flodo`.
+The package is published at [npmjs.com/package/flodo](https://www.npmjs.com/package/flodo).
+For a project-local install, use `npm install flodo`, then launch with `npx flodo`.
 Supports Windows x64, Linux x64 with glibc, and macOS Intel/Apple Silicon.
 The package includes the compiled applications, so installing needs no Rust
 toolchain or install scripts. Linux requires a desktop session and the usual
