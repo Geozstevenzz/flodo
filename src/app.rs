@@ -50,6 +50,7 @@ fn shortcuts(settings: &Settings) -> Vec<(String, &'static str)> {
         ("Up / Down".to_string(), "Walk the list"),
         ("Space".to_string(), "Check off the selected one"),
         (m("N"), "Jump to the composer"),
+        (m("F"), "Search to-dos"),
         (m("E"), "Show / hide completed"),
         (m("Shift+Backspace"), "Clear completed"),
         (m("P"), "Pin / unpin from the top"),
@@ -112,6 +113,10 @@ fn composer_id() -> egui::Id {
     egui::Id::new("composer")
 }
 
+fn search_id() -> egui::Id {
+    egui::Id::new("task-search")
+}
+
 /// A row's checkbox, by id, so a check-off from the keyboard bursts out of the
 /// same place a click does.
 fn checkbox_id(todo: u64) -> egui::Id {
@@ -171,6 +176,23 @@ struct FlagEditor {
     error: Option<&'static str>,
 }
 
+struct TargetDateEditor {
+    id: u64,
+    draft: String,
+    error: Option<&'static str>,
+    focus_requested: bool,
+}
+
+fn parse_target_date(draft: &str) -> Result<Option<chrono::NaiveDate>, &'static str> {
+    let draft = draft.trim();
+    if draft.is_empty() {
+        return Ok(None);
+    }
+    chrono::NaiveDate::parse_from_str(draft, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| "Enter a valid date as YYYY-MM-DD, or leave it empty.")
+}
+
 impl Default for FlagEditor {
     fn default() -> Self {
         Self {
@@ -201,6 +223,10 @@ pub struct Flodo {
     editing: Option<Editing>,
     composer: String,
     composer_focus: bool,
+    search: String,
+    search_focus: bool,
+    calendar: crate::calendar::Calendar,
+    target_date_editor: Option<TargetDateEditor>,
     show_settings: bool,
     show_flags: bool,
     flag_editor: FlagEditor,
@@ -262,6 +288,10 @@ impl Flodo {
             editing: None,
             composer: String::new(),
             composer_focus: false,
+            search: String::new(),
+            search_focus: false,
+            calendar: crate::calendar::Calendar::load(),
+            target_date_editor: None,
             show_settings: false,
             show_flags: false,
             flag_editor: FlagEditor::default(),
@@ -373,7 +403,7 @@ impl Flodo {
                 self.fireworks.backdate(Duration::from_millis(260));
             }
             // A realistic list, for the README screenshots.
-            "hero" => {
+            "hero" | "calendar" | "search" => {
                 let done = self.store.add("Renew the car registration");
                 self.store.toggle(done);
                 self.store.add("Reply to Sam about the offsite");
@@ -382,7 +412,16 @@ impl Flodo {
                 if let Some(t) = self.store.get_mut(snippet) {
                     t.body = "Races on the session cookie.".into();
                 }
-                self.store.add("Book the dentist");
+                let id = self.store.add("Book the dentist");
+                if let Some(todo) = self.store.get_mut(id) {
+                    todo.target_date = Some(chrono::Local::now().date_naive());
+                }
+                let flag = self.store.create_flag("Personal", [70, 160, 225]).unwrap();
+                self.store.set_flag(id, flag, true);
+                self.calendar.open = scenario == "calendar";
+                if scenario == "search" {
+                    self.search = "dentist".into();
+                }
             }
             "showcase" => {
                 self.store
@@ -704,11 +743,24 @@ impl Flodo {
     }
 
     fn visible(&self) -> Vec<u64> {
+        let query = self.search.trim().to_lowercase();
+        if query.is_empty() && self.settings.sort_order == SortOrder::Manual {
+            return self.store.visible_ids(self.settings.hide_completed);
+        }
         let mut todos: Vec<_> = self
             .store
             .todos
             .iter()
             .filter(|todo| !self.settings.hide_completed || !todo.done)
+            .filter(|todo| {
+                query.is_empty()
+                    || todo.title.to_lowercase().contains(&query)
+                    || todo.body.to_lowercase().contains(&query)
+                    || self.store.flags.iter().any(|flag| {
+                        todo.flag_ids.contains(&flag.id)
+                            && flag.name.to_lowercase().contains(&query)
+                    })
+            })
             .collect();
         if self.settings.sort_order != SortOrder::Manual {
             // Stable sorting keeps manual order for ties and never writes it back.
@@ -918,8 +970,18 @@ impl Flodo {
 
         // Esc: leave whatever we're in, innermost first.
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if self.show_flags {
+            if self.target_date_editor.is_some() {
+                self.target_date_editor = None;
+                return;
+            } else if self.calendar.open {
+                self.calendar.open = false;
+                return;
+            } else if self.show_flags {
                 self.show_flags = false;
+                return;
+            } else if ctx.memory(|m| m.has_focus(search_id())) {
+                self.search.clear();
+                ctx.memory_mut(|m| m.surrender_focus(search_id()));
                 return;
             } else if self.editing.is_some() {
                 self.cancel_edit();
@@ -937,7 +999,18 @@ impl Flodo {
         }
 
         // The manager's text fields must not trigger list shortcuts.
-        if self.show_flags {
+        if self.show_flags || self.calendar.open || self.target_date_editor.is_some() {
+            return;
+        }
+
+        if ctx.input_mut(|i| i.consume_key(cmd, Key::F)) {
+            self.search_focus = true;
+            self.show_settings = false;
+            self.cursor = None;
+            return;
+        }
+        // Search owns its editing shortcuts, including paste and Ctrl+Backspace.
+        if ctx.memory(|m| m.has_focus(search_id())) {
             return;
         }
 
@@ -987,12 +1060,18 @@ impl Flodo {
         }
         let target = self.editing.as_ref().map(|e| e.id).or(self.cursor);
         if let Some(id) = target {
-            if pressed(Key::ArrowUp) && self.settings.sort_order == SortOrder::Manual {
+            if pressed(Key::ArrowUp)
+                && self.settings.sort_order == SortOrder::Manual
+                && self.search.trim().is_empty()
+            {
                 self.store.move_up(id);
                 self.scroll_to_cursor = true;
                 self.touch_todos();
             }
-            if pressed(Key::ArrowDown) && self.settings.sort_order == SortOrder::Manual {
+            if pressed(Key::ArrowDown)
+                && self.settings.sort_order == SortOrder::Manual
+                && self.search.trim().is_empty()
+            {
                 self.store.move_down(id);
                 self.scroll_to_cursor = true;
                 self.touch_todos();
@@ -1431,14 +1510,48 @@ impl Flodo {
     fn list(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let previous_sort = self.settings.sort_order;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Sort").color(p.muted));
-            egui::ComboBox::from_id_salt("list-sort")
-                .selected_text(self.settings.sort_order.label())
-                .show_ui(ui, |ui| {
-                    for order in SortOrder::ALL {
-                        ui.selectable_value(&mut self.settings.sort_order, order, order.label());
-                    }
-                });
+            let width = ui.available_width();
+            if width >= 260.0 {
+                ui.label(egui::RichText::new("Sort").color(p.muted));
+            }
+            let sort_width = (width * 0.43).clamp(76.0, 175.0);
+            ui.allocate_ui(Vec2::new(sort_width, ui.spacing().interact_size.y), |ui| {
+                ui.set_max_width(sort_width);
+                egui::ComboBox::from_id_salt("list-sort")
+                    .width(sort_width)
+                    .truncate()
+                    .selected_text(self.settings.sort_order.label())
+                    .show_ui(ui, |ui| {
+                        for order in SortOrder::ALL {
+                            ui.selectable_value(
+                                &mut self.settings.sort_order,
+                                order,
+                                order.label(),
+                            );
+                        }
+                    });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.search.is_empty()
+                    && ui::icon_button(ui, p, ui::Action::new("Clear search"), ui::close).clicked()
+                {
+                    self.search.clear();
+                    self.search_focus = true;
+                }
+                let width = ui.available_width().max(24.0);
+                let response = ui.add_sized(
+                    [width, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut self.search)
+                        .id(search_id())
+                        .hint_text("Search")
+                        .desired_width(width),
+                );
+                if self.search_focus {
+                    response.request_focus();
+                    self.search_focus = false;
+                    self.composer_focus = false;
+                }
+            });
         });
         if previous_sort != self.settings.sort_order {
             self.touch_settings();
@@ -1464,7 +1577,19 @@ impl Flodo {
         }
 
         if visible.is_empty() {
-            self.empty_state(ui, p);
+            if self.search.trim().is_empty() {
+                self.empty_state(ui, p);
+            } else {
+                ui.add_space(22.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("No matching to-dos").color(p.text));
+                    ui.label(
+                        egui::RichText::new("Try another search or clear the field.")
+                            .small()
+                            .color(p.muted),
+                    );
+                });
+            }
             return;
         }
 
@@ -1475,6 +1600,7 @@ impl Flodo {
         let mut drag: Option<(u64, f32, bool)> = None;
         let mut importance: Option<(u64, Importance)> = None;
         let mut custom_flag: Option<(u64, u64, bool)> = None;
+        let mut target_date: Option<u64> = None;
         let mut draft: Option<String> = None;
 
         let mut rects = Vec::with_capacity(visible.len());
@@ -1513,6 +1639,9 @@ impl Flodo {
             if out.manage_flags {
                 self.show_flags = true;
             }
+            if out.target_date {
+                target_date = Some(id);
+            }
             if let Some(d) = out.draft {
                 draft = Some(d);
             }
@@ -1520,6 +1649,22 @@ impl Flodo {
         }
         self.scroll_to_cursor = false;
         self.completed_footer(ui, p);
+
+        if let Some(id) = target_date {
+            self.commit_edit();
+            self.target_date_editor = Some(TargetDateEditor {
+                id,
+                draft: self
+                    .store
+                    .get(id)
+                    .and_then(|todo| todo.target_date)
+                    .map(|date| date.to_string())
+                    .unwrap_or_default(),
+                error: None,
+                focus_requested: false,
+            });
+            self.composer_focus = false;
+        }
 
         if let (Some(d), Some(e)) = (draft, self.editing.as_mut()) {
             e.draft = d;
@@ -1560,9 +1705,9 @@ impl Flodo {
             self.store.set_flag(id, flag_id, assigned);
             self.touch_todos();
         }
-        if let Some((id, y, released)) =
-            drag.filter(|_| self.settings.sort_order == SortOrder::Manual)
-        {
+        if let Some((id, y, released)) = drag.filter(|_| {
+            self.settings.sort_order == SortOrder::Manual && self.search.trim().is_empty()
+        }) {
             if let (Some(from), Some(to)) = (
                 visible.iter().position(|item| *item == id),
                 drop_target(&rects, y),
@@ -1633,7 +1778,8 @@ impl Flodo {
 
                     let (grip_r, _) =
                         ui.allocate_exact_size(Vec2::new(10.0, ui::ICON), egui::Sense::hover());
-                    let manual = self.settings.sort_order == SortOrder::Manual;
+                    let manual = self.settings.sort_order == SortOrder::Manual
+                        && self.search.trim().is_empty();
                     let grip_resp = ui.interact(
                         grip_r,
                         row_id.with("grip"),
@@ -1761,7 +1907,7 @@ impl Flodo {
                                 });
                             });
 
-                            if !todo.flag_ids.is_empty() {
+                            if !todo.flag_ids.is_empty() || todo.target_date.is_some() {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
                                     for flag in self
@@ -1775,6 +1921,7 @@ impl Flodo {
                                             .corner_radius(4)
                                             .inner_margin(egui::Margin::symmetric(5, 2))
                                             .show(ui, |ui| {
+                                                ui.set_max_width((content_w - 10.0).max(30.0));
                                                 ui.horizontal(|ui| {
                                                     let (r, _) = ui.allocate_exact_size(
                                                         Vec2::splat(7.0),
@@ -1789,13 +1936,44 @@ impl Flodo {
                                                             flag.color[2],
                                                         ),
                                                     );
-                                                    ui.label(
-                                                        egui::RichText::new(&flag.name)
-                                                            .size(size * 0.8)
-                                                            .color(p.text),
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&flag.name)
+                                                                .size(size * 0.8)
+                                                                .color(p.text),
+                                                        )
+                                                        .wrap(),
                                                     );
                                                 });
                                             });
+                                    }
+                                    if let Some(date) = todo.target_date {
+                                        let today = chrono::Local::now().date_naive();
+                                        let color = if date < today && !todo.done {
+                                            p.danger
+                                        } else if date == today && !todo.done {
+                                            p.accent
+                                        } else {
+                                            p.muted
+                                        };
+                                        let label = format!("Target {}", date.format("%-d %b %Y"));
+                                        let response = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new(label)
+                                                    .size(size * 0.8)
+                                                    .color(color),
+                                            )
+                                            .frame(false)
+                                            .wrap(),
+                                        );
+                                        ui::hint(
+                                            ui.ctx(),
+                                            &response,
+                                            ui::Action::new("Edit target date"),
+                                        );
+                                        if response.clicked() {
+                                            out.target_date = true;
+                                        }
                                     }
                                 });
                             }
@@ -1931,6 +2109,18 @@ impl Flodo {
                                 }
                             }
                             ui.separator();
+                            if ui
+                                .button(if todo.target_date.is_some() {
+                                    "Edit target date..."
+                                } else {
+                                    "Add target date..."
+                                })
+                                .clicked()
+                            {
+                                out.target_date = true;
+                                ui.close();
+                            }
+                            ui.separator();
                             ui.label("Custom flags");
                             egui::ScrollArea::vertical()
                                 .max_height(180.0)
@@ -2030,12 +2220,75 @@ struct RowOut {
     importance: Option<Importance>,
     custom_flag: Option<(u64, bool)>,
     manage_flags: bool,
+    target_date: bool,
     draft: Option<String>,
 }
 
 // ------------------------------------------------------------------ settings
 
 impl Flodo {
+    fn target_date_window(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(editor) = self.target_date_editor.as_mut() else {
+            return;
+        };
+        let mut save = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("target-date-editor")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(170.0, 280.0));
+            ui.heading("Target date");
+            ui.label(
+                egui::RichText::new("Optional. Leave empty to remove it.")
+                    .small()
+                    .color(p.muted),
+            );
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut editor.draft)
+                    .id(egui::Id::new("target-date-input"))
+                    .hint_text("YYYY-MM-DD")
+                    .desired_width(f32::INFINITY),
+            );
+            if !editor.focus_requested {
+                response.request_focus();
+                editor.focus_requested = true;
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Today").clicked() {
+                    editor.draft = chrono::Local::now().date_naive().to_string();
+                }
+                if ui.button("Tomorrow").clicked() {
+                    if let Some(date) = chrono::Local::now().date_naive().succ_opt() {
+                        editor.draft = date.to_string();
+                    }
+                }
+                if ui.button("Clear").clicked() {
+                    editor.draft.clear();
+                }
+            });
+            if let Some(error) = editor.error {
+                ui.label(egui::RichText::new(error).color(p.danger));
+            }
+            ui.horizontal(|ui| {
+                save = ui.button("Save").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+            save |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        });
+        if cancel {
+            self.target_date_editor = None;
+        } else if save {
+            match parse_target_date(&editor.draft) {
+                Ok(date) => {
+                    if let Some(todo) = self.store.get_mut(editor.id) {
+                        todo.target_date = date;
+                        self.touch_todos();
+                    }
+                    self.target_date_editor = None;
+                }
+                Err(error) => editor.error = Some(error),
+            }
+        }
+    }
+
     fn flags_window(&mut self, ctx: &egui::Context, p: &Palette) {
         if !self.show_flags {
             return;
@@ -2788,6 +3041,7 @@ impl eframe::App for Flodo {
 
             egui::ScrollArea::vertical()
                 .id_salt("list")
+                .max_width((ui.available_width() - 26.0).max(100.0))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     self.list(ui, &p);
@@ -2797,6 +3051,17 @@ impl eframe::App for Flodo {
         self.toast_ui(&ctx, &p);
         self.flags_window(&ctx, &p);
         self.fireworks.paint(&ctx, &p, size);
+        let calendar_was_open = self.calendar.open;
+        self.calendar.show(&ctx, &p);
+        if self.calendar.open && !calendar_was_open {
+            self.commit_edit();
+            self.composer_focus = false;
+            self.cursor = None;
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+        self.target_date_window(&ctx, &p);
         crate::window::resize_frame(ui);
 
         // Drafts are written back after drawing so the row closure can stay
@@ -2907,6 +3172,65 @@ impl Flodo {
 mod tests {
     use super::*;
     use eframe::egui::{Pos2, RawInput, Rect};
+
+    #[test]
+    fn calendar_target_date_is_optional_validated_and_kept_in_cli_output() {
+        assert_eq!(parse_target_date("  ").unwrap(), None);
+        assert!(parse_target_date("2026-02-30").is_err());
+        let mut todo: Todo = serde_json::from_str(r#"{"id":1,"title":"Existing task"}"#).unwrap();
+        assert!(todo.target_date.is_none());
+        todo.target_date = parse_target_date("2026-11-11").unwrap();
+        let raw = serde_json::to_string(&todo).unwrap();
+        let restored: Todo = serde_json::from_str(&raw).unwrap();
+        assert_eq!(restored.target_date, todo.target_date);
+        let record = crate::cli::Record::from((&restored, &Store::default()));
+        assert_eq!(record.target_date, todo.target_date);
+        todo.target_date = None;
+        assert!(!serde_json::to_string(&todo)
+            .unwrap()
+            .contains("target_date"));
+    }
+
+    #[test]
+    fn calendar_search_filters_without_changing_order_or_leaking_shortcuts() {
+        let mut app = app();
+        let a = app.store.add("Review the PLAN");
+        let b = app.store.add("Call supplier");
+        app.store.get_mut(b).unwrap().body = "Discuss the plan".into();
+        let c = app.store.add("Book room");
+        let flag = app.store.create_flag("Planning", [70, 160, 225]).unwrap();
+        app.store.set_flag(c, flag, true);
+        let manual = app.visible();
+        app.search = "  pLaN  ".into();
+        assert_eq!(app.visible(), vec![c, b, a]);
+        app.settings.hide_completed = true;
+        app.store.toggle(b);
+        assert_eq!(app.visible(), vec![c, a]);
+        app.search = "no match".into();
+        assert!(app.visible().is_empty());
+        app.search.clear();
+        app.settings.hide_completed = false;
+        assert_eq!(app.visible(), manual);
+        assert!(app.dirty_todos.is_none());
+
+        let ctx = ctx();
+        shortcuts_pass(&ctx, &mut app, key(egui::Key::F, egui::Modifiers::COMMAND));
+        assert!(app.search_focus);
+        ctx.memory_mut(|m| m.request_focus(search_id()));
+        shortcuts_pass(
+            &ctx,
+            &mut app,
+            input(vec![egui::Event::Paste("a\nb".into())]),
+        );
+        assert_eq!(app.store.todos.len(), 3);
+        assert!(app.composer.is_empty());
+        app.calendar.open = true;
+        app.cursor = Some(a);
+        press(&ctx, &mut app, egui::Key::Delete);
+        assert!(app.store.get(a).is_some());
+        press(&ctx, &mut app, egui::Key::Escape);
+        assert!(!app.calendar.open);
+    }
 
     #[test]
     fn importance_sort_is_stable_and_preserves_manual_order() {
@@ -3177,6 +3501,10 @@ mod tests {
             editing: None,
             composer: String::new(),
             composer_focus: false,
+            search: String::new(),
+            search_focus: false,
+            calendar: crate::calendar::Calendar::default(),
+            target_date_editor: None,
             show_settings: false,
             show_flags: false,
             flag_editor: FlagEditor::default(),

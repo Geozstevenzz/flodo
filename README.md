@@ -33,9 +33,12 @@ a minimize button, and npm installation.
 | Resize | Grab any edge or corner. Resize targets cover eight logical pixels along each edge, with longer corner targets. |
 | Importance | Click a row's flag to choose no flag, low (blue), medium (amber), or high (red). Flags persist without changing your chosen row order. |
 | Custom flags | Create named flags with your own colors from Settings or a row's flag menu. Assign multiple flags to a to-do; rename, recolor, or delete them from the flag manager. |
+| Target date | Optionally add a date from a task's flag menu. It appears beside custom flags and wraps when space is tight. Click the date to edit or remove it. |
 | Minimize | Use the minus button in the title bar to minimize the window. Restore it through your taskbar or Dock. |
 | Reordering | Drag the row handle to a drop indicator, then release. Rows stay still during the gesture. |
 | Sorting | Choose Manual order, High importance first, or Low importance first. Unflagged items stay last; switching to Manual order restores your drag order. |
+| Search | Search titles, descriptions, and custom flag names from the right side of the sorting row. Ctrl+F (Cmd+F on macOS) focuses search; Esc clears it. |
+| Calendar | A collapsed tab on the right opens a sliding agenda for today and the next seven days. Add local meetings and appointments, or read your Classic Outlook calendar on Windows. |
 | Numbering | Checkbox circles show each item's visible position, starting at 1. Numbers update when you sort, reorder, or hide completed items; clicking still checks an item off. |
 | Bodies | A to-do is one line, but can carry a collapsible markdown description underneath, including fenced code snippets. <kbd>⌘</kbd><kbd>⏎</kbd> or the chevron opens one. |
 | Appearance | Eight accent colours, light and dark, plus font, code font, text size, row spacing, and opacity. |
@@ -45,7 +48,7 @@ a minimize button, and npm installation.
 | Quick capture | Double-tap <kbd>⇧</kbd> anywhere to summon Flodo and write down whatever text you had selected. Off by default; macOS only. |
 | Undo | Deletes, check-offs, clears and pastes all go back with <kbd>⌘</kbd><kbd>Z</kbd>, as many steps as you like. A delete is also announced and offered back for a few seconds. |
 | Size | A single binary, around 8 MB. No webview, no background service, no account. |
-| Storage | Two JSON files you can read, edit, and sync. |
+| Storage | Plain JSON files you can read, edit, and sync. |
 | Scripting | A CLI over the same list, and an optional Claude skill for agents. |
 
 ## Install
@@ -95,6 +98,38 @@ Use the importance sort control to put high importance items at the top or
 bottom of the flagged items. Items without an importance flag stay last, and
 items with the same importance keep their manual order. Switch back to
 **Manual order** to rearrange items by dragging.
+
+### Search and calendar
+
+Use **Add target date...** in a task's flag menu to set an optional date
+(`YYYY-MM-DD`). The date appears on the same line as custom flags, wrapping
+when needed. Click it to edit it; clear the field and save to remove it.
+Overdue dates use the warning color and today's date uses the accent color.
+Target dates stay with tasks and do not create calendar appointments.
+They are included in `flodo list --json` when set.
+
+Search sits on the right of the sorting row and matches task titles,
+descriptions, and custom flag names without changing saved order. Existing
+completed-item visibility still applies. Clear the field to restore the list.
+Dragging is disabled while searching so hidden items keep their positions.
+
+Click the calendar tab on the right border to slide open the agenda. It starts
+collapsed on each launch. Today appears first, followed by the next seven
+calendar days. Add a meeting or appointment with a date, start and end time,
+and optional location. Local entries can be edited or deleted in the drawer
+and are saved separately in `calendar.json` alongside your task data.
+
+On Windows, open Classic Outlook in the same desktop session and use
+**Refresh Outlook** in the drawer. It reads the default calendar, including
+recurring occurrences, all-day events, and events spanning several days.
+Cancelled and declined meetings are excluded. Outlook refreshes when the
+drawer first opens and every five minutes while it is open; the status shows
+the refresh time or an error. All times use the local calendar clock. Outlook
+entries are read-only; local Flodo entries are not sent to Outlook and do not
+send invitations. Outlook entries remain in memory for this session, and a
+failed refresh keeps the previous result with a warning. New Outlook, macOS,
+and Linux do not support this connection; local calendar entries work on all
+three platforms.
 
 ### Standalone download
 
@@ -445,7 +480,9 @@ require it.
 | Linux | `~/.local/share/flodo/` |
 | Windows | `%APPDATA%\Flodo\` |
 
-Two plain JSON files. `todos.json` looks like this:
+`todos.json` and `settings.json` hold your tasks and preferences. Local calendar
+entries use `calendar.json`, created when you first save an event.
+`todos.json` looks like this:
 
 ```json
 {
@@ -528,7 +565,9 @@ xvfb-run -a -s "-screen 0 700x900x24" \
 ```
 
 `FLODO_DEMO` seeds a scenario in memory without touching the real list:
-`hero`, `showcase`, `editing`, `rendered`, `settings`, `empty`, `long`, `body`.
+`hero`, `calendar`, `search`, `showcase`, `editing`, `rendered`, `settings`,
+`empty`, `long`, `body`. The calendar scenario uses `calendar.json` from the
+isolated screenshot state directory.
 
 Every screenshot in this README is produced that way, and
 `scripts/screenshots.sh` regenerates all of them. It writes a settings file per

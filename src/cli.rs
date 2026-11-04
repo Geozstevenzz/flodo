@@ -166,6 +166,8 @@ pub struct Record {
     pub completed_at: Option<i64>,
     pub importance: Importance,
     pub flags: Vec<FlagRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_date: Option<chrono::NaiveDate>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -185,6 +187,7 @@ impl From<(&Todo, &Store)> for Record {
             created_at: t.created_at,
             completed_at: t.completed_at,
             importance: t.importance,
+            target_date: t.target_date,
             flags: store
                 .flags
                 .iter()

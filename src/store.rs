@@ -59,7 +59,7 @@ pub fn state_dir() -> PathBuf {
 
 /// Temp file in the same directory (rename is only atomic within a filesystem),
 /// fsync, then rename over the target.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod calendar;
 mod capture;
 mod celebrate;
 mod cli;
@@ -12,6 +13,7 @@ mod hotkey;
 mod icon;
 mod markdown;
 mod model;
+mod outlook;
 mod settings;
 mod store;
 mod theme;

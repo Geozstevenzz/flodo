@@ -10,7 +10,7 @@ fn default_version() -> u32 {
     STORE_VERSION
 }
 
-/// Seconds since the Unix epoch. Avoids a `chrono` dependency.
+/// Seconds since the Unix epoch for task creation and completion timestamps.
 pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,6 +75,8 @@ pub struct Todo {
     pub importance: Importance,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flag_ids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_date: Option<chrono::NaiveDate>,
     /// Catches keys written by a newer version so we round-trip instead of
     /// destroying them.
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
@@ -93,6 +95,7 @@ impl Todo {
             expanded: false,
             importance: Importance::None,
             flag_ids: Vec::new(),
+            target_date: None,
             extra: Map::new(),
         }
     }
