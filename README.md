@@ -23,7 +23,20 @@ list: add a to-do, check it off, and hide the completed ones when you want to.
 
 This fork of [michellemayes/flodo](https://github.com/michellemayes/flodo)
 adds importance and custom flags, larger resize targets, stable drag reordering,
-a minimize button, and npm installation.
+a minimize button, search, optional target dates, and a sliding calendar.
+
+## New in 0.4.0
+
+- Search task titles, descriptions, and custom flags beside the sorting dropdown.
+- Set optional target dates that appear beside each task's flags and wrap as needed.
+- Open the calendar from the right edge. Browse months, find dates with events
+  marked in red, and select a day to see its meetings and appointments below.
+- Add local events on any platform, or read the default Classic Outlook calendar
+  on Windows. Outlook entries are read-only; Flodo sends no invitations.
+
+<img src="docs/images/calendar.png" alt="Flodo's dark month calendar with red event dates and appointments below" width="340">
+
+The calendar image uses example local events.
 
 ## What it does
 
@@ -99,7 +112,7 @@ bottom of the flagged items. Items without an importance flag stay last, and
 items with the same importance keep their manual order. Switch back to
 **Manual order** to rearrange items by dragging.
 
-### Search and calendar
+### Target dates
 
 Use **Add target date...** in a task's flag menu to set an optional date
 (`YYYY-MM-DD`). The date appears on the same line as custom flags, wrapping
@@ -108,23 +121,29 @@ Overdue dates use the warning color and today's date uses the accent color.
 Target dates stay with tasks and do not create calendar appointments.
 They are included in `flodo list --json` when set.
 
+### Search
+
 Search sits on the right of the sorting row and matches task titles,
 descriptions, and custom flag names without changing saved order. Existing
 completed-item visibility still applies. Clear the field to restore the list.
 Dragging is disabled while searching so hidden items keep their positions.
 
+### Calendar
+
 Click the calendar tab on the right border to slide open the month calendar.
 It starts collapsed on each launch. Dates with events have red numbers and
 dots; select a date to see its events below, followed by upcoming events in
 the next seven days. Use the arrows to browse months or **Today** to return.
-The calendar follows the app's theme. Add a meeting or appointment with a date, start and end time,
-and optional location. Local entries can be edited or deleted in the drawer
+The calendar follows the app's theme. Add a meeting or appointment with a date,
+start and end time, and optional location. New events use the selected date.
+Local entries can be edited or deleted in the drawer
 and are saved separately in `calendar.json` alongside your task data.
 
 On Windows, open Classic Outlook in the same desktop session and use
 **Refresh Outlook** in the drawer. It reads the default calendar, including
 recurring occurrences, all-day events, and events spanning several days for
-the displayed month and its surrounding week. Browsing months refreshes this range.
+the displayed month and its surrounding week. Browsing months refreshes this
+range. The Outlook refresh button and status appear below the event list.
 Cancelled and declined meetings are excluded. Outlook refreshes when the
 drawer first opens and every five minutes while it is open; the status shows
 the refresh time or an error. All times use the local calendar clock. Outlook

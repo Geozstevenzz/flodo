@@ -216,6 +216,7 @@ impl Calendar {
         self.outlook.poll(ctx);
         let range = outlook_range(self.month);
         if self.open
+            && std::env::var_os("FLODO_DEMO").is_none()
             && !self.outlook.is_loading()
             && (self.outlook_range != Some(range)
                 || self
