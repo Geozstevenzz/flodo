@@ -1,6 +1,6 @@
 //! Read-only adapter for the active Windows Classic Outlook session.
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use eframe::egui;
 use serde::Deserialize;
 use std::sync::mpsc::{self, Receiver};
@@ -52,7 +52,7 @@ impl Outlook {
         self.receiver.is_some()
     }
 
-    pub fn refresh(&mut self) {
+    pub fn refresh(&mut self, from: NaiveDate, until: NaiveDate) {
         if self.is_loading() {
             return;
         }
@@ -61,7 +61,7 @@ impl Outlook {
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         std::thread::spawn(move || {
-            let _ = sender.send(read_calendar());
+            let _ = sender.send(read_calendar(from, until));
         });
     }
 
@@ -118,12 +118,12 @@ fn parse_snapshot(raw: &[u8]) -> Result<Vec<OutlookEvent>, String> {
 }
 
 #[cfg(not(windows))]
-fn read_calendar() -> Result<Vec<OutlookEvent>, String> {
+fn read_calendar(_from: NaiveDate, _until: NaiveDate) -> Result<Vec<OutlookEvent>, String> {
     Err("Outlook sync requires Classic Outlook on Windows.".into())
 }
 
 #[cfg(windows)]
-fn read_calendar() -> Result<Vec<OutlookEvent>, String> {
+fn read_calendar(from: NaiveDate, until: NaiveDate) -> Result<Vec<OutlookEvent>, String> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -138,6 +138,8 @@ fn read_calendar() -> Result<Vec<OutlookEvent>, String> {
             "-Command",
         ])
         .arg(include_str!("outlook-calendar.ps1"))
+        .env("FLODO_CALENDAR_FROM", from.to_string())
+        .env("FLODO_CALENDAR_UNTIL", until.to_string())
         .creation_flags(0x08000000) // CREATE_NO_WINDOW, including debug builds.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

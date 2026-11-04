@@ -38,7 +38,7 @@ a minimize button, and npm installation.
 | Reordering | Drag the row handle to a drop indicator, then release. Rows stay still during the gesture. |
 | Sorting | Choose Manual order, High importance first, or Low importance first. Unflagged items stay last; switching to Manual order restores your drag order. |
 | Search | Search titles, descriptions, and custom flag names from the right side of the sorting row. Ctrl+F (Cmd+F on macOS) focuses search; Esc clears it. |
-| Calendar | A collapsed tab on the right opens a sliding agenda for today and the next seven days. Add local meetings and appointments, or read your Classic Outlook calendar on Windows. |
+| Calendar | A collapsed tab on the right opens a month calendar. Dates with events appear in red; select a date to see its events and the next seven days below. Add local events or read Classic Outlook on Windows. |
 | Numbering | Checkbox circles show each item's visible position, starting at 1. Numbers update when you sort, reorder, or hide completed items; clicking still checks an item off. |
 | Bodies | A to-do is one line, but can carry a collapsible markdown description underneath, including fenced code snippets. <kbd>⌘</kbd><kbd>⏎</kbd> or the chevron opens one. |
 | Appearance | Eight accent colours, light and dark, plus font, code font, text size, row spacing, and opacity. |
@@ -113,15 +113,18 @@ descriptions, and custom flag names without changing saved order. Existing
 completed-item visibility still applies. Clear the field to restore the list.
 Dragging is disabled while searching so hidden items keep their positions.
 
-Click the calendar tab on the right border to slide open the agenda. It starts
-collapsed on each launch. Today appears first, followed by the next seven
-calendar days. Add a meeting or appointment with a date, start and end time,
+Click the calendar tab on the right border to slide open the month calendar.
+It starts collapsed on each launch. Dates with events have red numbers and
+dots; select a date to see its events below, followed by upcoming events in
+the next seven days. Use the arrows to browse months or **Today** to return.
+The calendar follows the app's theme. Add a meeting or appointment with a date, start and end time,
 and optional location. Local entries can be edited or deleted in the drawer
 and are saved separately in `calendar.json` alongside your task data.
 
 On Windows, open Classic Outlook in the same desktop session and use
 **Refresh Outlook** in the drawer. It reads the default calendar, including
-recurring occurrences, all-day events, and events spanning several days.
+recurring occurrences, all-day events, and events spanning several days for
+the displayed month and its surrounding week. Browsing months refreshes this range.
 Cancelled and declined meetings are excluded. Outlook refreshes when the
 drawer first opens and every five minutes while it is open; the status shows
 the refresh time or an error. All times use the local calendar clock. Outlook

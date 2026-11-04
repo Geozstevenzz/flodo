@@ -7,6 +7,11 @@ try {
     $calendar = $outlook.GetNamespace('MAPI').GetDefaultFolder(9)
     $from = [DateTime]::Today
     $until = $from.AddDays(8)
+    if ($env:FLODO_CALENDAR_FROM -and $env:FLODO_CALENDAR_UNTIL) {
+        $from = [DateTime]::ParseExact($env:FLODO_CALENDAR_FROM, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+        $until = [DateTime]::ParseExact($env:FLODO_CALENDAR_UNTIL, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+        if ($until -le $from -or ($until - $from).TotalDays -gt 45) { throw 'Invalid calendar date range' }
+    }
     $items = $calendar.Items
     $items.Sort('[Start]')
     $items.IncludeRecurrences = $true
