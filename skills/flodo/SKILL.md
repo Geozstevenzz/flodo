@@ -122,5 +122,11 @@ flodo add "Fix the N+1 query in the orders report" \
 - Sync keeps its clone in `sync/repo` and the pre-sync copies in
   `sync/last-local-todos.json` and `sync/last-local-calendar.json` under the
   data directory. Never edit or commit in that clone.
+- Updating: Settings in the app has an update button that installs the newest
+  npm release and restarts Flodo. `flodo update --check` says whether a newer
+  version exists; it never installs. Only update when the user asks. After an
+  in-app update, `update-result.json` (removed once the app has shown it) and
+  `update.log` (the end of npm's output) are in the data directory; read
+  `update.log` if an update failed.
 - On Windows, release builds are GUI-subsystem and print nothing to a console.
   The CLI is intended for macOS and Linux.

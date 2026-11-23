@@ -15,6 +15,25 @@ function executable(platform, arch, root = path.join(__dirname, '..')) {
   throw new Error(`Unsupported platform ${platform}/${arch}. Flodo supports Windows x64, Linux x64 (glibc), and macOS Intel/Apple Silicon.`);
 }
 
+// The npm CLI that ships with this node, so the app's update button can run
+// npm without relying on PATH. A GUI app started from a shortcut or a desktop
+// menu often has a PATH without npm on it.
+function npmCli(platform, execPath, exists = existsSync) {
+  const dir = path.dirname(execPath);
+  const cli = platform === 'win32'
+    ? path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+    : path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  return exists(cli) ? path.resolve(cli) : null;
+}
+
+function launchEnv(env, platform = process.platform, execPath = process.execPath, exists = existsSync) {
+  const cli = npmCli(platform, execPath, exists);
+  const out = { ...env, FLODO_NODE: execPath };
+  if (cli) out.FLODO_NPM_CLI = cli;
+  else delete out.FLODO_NPM_CLI;
+  return out;
+}
+
 function launch(args) {
   const binary = executable(process.platform, process.arch);
   if (!existsSync(binary)) {
@@ -26,7 +45,7 @@ function launch(args) {
     macGui ? ['-a', path.resolve(binary, '..', '..', '..')] : args, {
       // Keep the inherited environment, including FLODO_STATE_DIR and APPDATA,
       // so this fork opens the legacy application's existing files.
-      env: process.env,
+      env: launchEnv(process.env),
       windowsHide: true,
       detached: gui,
       // A Windows GUI-subsystem executable needs pipes for its CLI output.
@@ -53,4 +72,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { executable };
+module.exports = { executable, npmCli, launchEnv };

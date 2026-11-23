@@ -7,7 +7,7 @@ use crate::settings::{
     Appearance, FontChoice, Settings, SortOrder, FONT_SIZE_RANGE, OPACITY_RANGE, SPACING_RANGE,
 };
 use crate::theme::{Accent, Palette};
-use crate::{capture, fonts, hotkey, merge, store, sync, ui};
+use crate::{capture, fonts, hotkey, merge, store, sync, ui, update};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, Vec2};
 use std::collections::HashMap;
@@ -277,6 +277,9 @@ pub struct Flodo {
     /// The remote field's text, applied when it loses focus so a half-typed
     /// URL never starts a sync.
     sync_draft: String,
+
+    /// Checks npm for a newer version and hands over to the updater.
+    update: update::Client,
 }
 
 impl Flodo {
@@ -292,6 +295,8 @@ impl Flodo {
         };
 
         let sync_draft = settings.sync.remote.clone();
+        // The screenshot harness must never touch a network or restart.
+        let side_effects = std::env::var_os("FLODO_DEMO").is_none();
         let mut app = Self {
             disk_store: todos.clone(),
             store: todos,
@@ -329,8 +334,13 @@ impl Flodo {
             disk_mtime: store::todos_mtime(),
             last_disk_check: Instant::now(),
             sync: sync::Client::default(),
-            sync_allowed: std::env::var_os("FLODO_DEMO").is_none(),
+            sync_allowed: side_effects,
             sync_draft,
+            update: if side_effects {
+                update::Client::new(&store::state_dir())
+            } else {
+                update::Client::disabled()
+            },
         };
         app.hotkey = hotkey::Hotkey::register(&app.settings.hotkey);
         app.seed_demo_if_requested();
@@ -967,16 +977,38 @@ impl Flodo {
         if !self.sync_allowed {
             return;
         }
-        let finished = self.sync.tick(
-            ctx,
-            &store::state_dir(),
-            self.settings.sync.active_remote(),
-            self.dirty_todos.is_some(),
-        );
+        // Once an update is accepted no new cycle starts; one in flight is
+        // still collected, and the update waits for it.
+        let remote = if self.update.is_updating() {
+            None
+        } else {
+            self.settings.sync.active_remote()
+        };
+        let finished = self
+            .sync
+            .tick(ctx, &store::state_dir(), remote, self.dirty_todos.is_some());
         if finished {
             self.calendar.reload_if_changed();
             self.absorb_disk_changes();
             ctx.request_repaint();
+        }
+    }
+
+    /// Runs the update checks, and once an update is accepted and no sync is
+    /// running, saves everything, starts the updater and closes the window.
+    /// Closing goes through the normal path, so `on_exit` saves again.
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        self.update.tick(ctx);
+        if !self.update.waiting() {
+            return;
+        }
+        if self.sync.is_running() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        self.flush();
+        if self.update.hand_over(&store::state_dir()).is_ok() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -2604,6 +2636,7 @@ impl Flodo {
 
                 self.quick_capture_picker(ui, p);
                 self.sync_settings(ui, p);
+                self.update_settings(ui, p);
 
                 ui.add_space(2.0);
                 ui::rule(ui, p);
@@ -2671,6 +2704,50 @@ impl Flodo {
             // Unsaved edits go to disk first, so this sync carries them.
             self.flush();
             self.sync.sync_now();
+        }
+    }
+
+    /// Updates in two lines: the version, then one button and how it went.
+    fn update_settings(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let size = self.settings.font_size;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Updates")
+                    .color(p.muted)
+                    .size(size * 0.9)
+                    .family(FontFamily::Name(FAMILY_UI.into())),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("Version {}", update::CURRENT))
+                        .color(p.muted.gamma_multiply(0.85))
+                        .size(size * 0.85),
+                );
+            });
+        });
+        if !self.update.installed_by_npm() {
+            ui.label(
+                egui::RichText::new("Installed outside npm; update it the way you installed it.")
+                    .color(p.muted)
+                    .size(size * 0.8),
+            );
+            return;
+        }
+        let mut pressed = false;
+        ui.horizontal_wrapped(|ui| {
+            let (text, enabled) = self.update.button();
+            pressed = ui.add_enabled(enabled, egui::Button::new(text)).clicked();
+            let (line, problem) = self.update.line();
+            if !line.is_empty() {
+                let color = if problem { p.danger } else { p.muted };
+                ui.label(egui::RichText::new(line).color(color).size(size * 0.8));
+            }
+        });
+        if pressed {
+            match self.update.status() {
+                update::Status::Available(_) => self.update.accept(),
+                _ => self.update.check_now(),
+            }
         }
     }
 
@@ -3175,6 +3252,7 @@ impl eframe::App for Flodo {
         self.settle_edits(&ctx);
         self.save_if_due(&ctx);
         self.poll_sync(&ctx);
+        self.poll_update(&ctx);
     }
 }
 
@@ -3685,6 +3763,7 @@ mod tests {
             sync: sync::Client::default(),
             sync_allowed: false,
             sync_draft: String::new(),
+            update: update::Client::disabled(),
         }
     }
 

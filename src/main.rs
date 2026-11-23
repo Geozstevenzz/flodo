@@ -20,6 +20,7 @@ mod store;
 mod sync;
 mod theme;
 mod ui;
+mod update;
 mod window;
 
 use eframe::egui;

@@ -25,6 +25,12 @@ This fork of [michellemayes/flodo](https://github.com/michellemayes/flodo)
 adds importance and custom flags, larger resize targets, stable drag reordering,
 a minimize button, search, optional target dates, and a sliding calendar.
 
+## New in 0.6.0
+
+- Update from inside the app. Settings shows the installed version and offers
+  newer ones from npm; one click installs it and restarts Flodo. See
+  [Updating](#updating).
+
 ## New in 0.5.0
 
 - Keep the same tasks, flags, target dates and local calendar events on several
@@ -83,13 +89,39 @@ flodo
 ```
 
 The package is published at [npmjs.com/package/flodo](https://www.npmjs.com/package/flodo).
-To update, quit Flodo, run `npm install -g flodo@latest`, then launch `flodo` again.
+To update, use the button in Settings (see [Updating](#updating)), or quit
+Flodo, run `npm install -g flodo@latest`, then launch `flodo` again.
 Check the installed version with `flodo --version`.
 For a project-local install, use `npm install flodo`, then launch with `npx flodo`.
 Supports Windows x64, Linux x64 with glibc, and macOS Intel/Apple Silicon.
 The package includes the compiled applications, so installing needs no Rust
 toolchain or install scripts. Linux requires a desktop session and the usual
 OpenGL, X11 or Wayland runtime libraries.
+
+### Updating
+
+Settings has an **Updates** group with the installed version and one button.
+A few seconds after launch, and whenever you press **Check for updates**,
+Flodo asks npm for the latest published version. It checks at no other time.
+When a newer release exists, the button reads **Update to 0.6.1 and restart**
+(with the real version number).
+
+Pressing it saves your list and settings, waits for a sync in progress to
+finish, starts a small helper and closes Flodo. The helper waits for Flodo to
+exit, runs `npm install -g flodo@<version> --prefix <your npm prefix>` with the
+exact version it offered, and starts Flodo again, even if the install failed.
+Flodo has to close first because Windows cannot replace a running
+executable; npm would fail with `EBUSY` or `EPERM`.
+
+The next launch shows the outcome once in the same place. The helper leaves
+`update-result.json` (the outcome, deleted once shown) and `update.log` (the
+last 20 lines of npm's output) in your data directory.
+
+`flodo update --check` prints whether a newer version exists. The command line
+does not install updates itself, because it cannot replace a running Flodo.
+
+The button needs Flodo to be installed with `npm install -g`. A standalone
+download or a project-local install says so instead and leaves updating to you.
 
 ### Keep your existing to-dos
 
@@ -481,6 +513,7 @@ $ flodo list --count
 | `flodo sync setup <url>` | Set the remote, turn sync on, and sync |
 | `flodo sync status` | Show the remote and the last result |
 | `flodo sync off` | Stop syncing; the remote is kept |
+| `flodo update --check` | Say whether a newer version is on npm |
 
 `--json` gives a stable record shape — internal fields never leak into it:
 
@@ -548,6 +581,7 @@ require it.
 entries use `calendar.json`, created when you first save an event. With sync
 on, the `sync` folder holds Flodo's clone of your repository and the backup
 copies described in [Sync across computers](#sync-across-computers).
+After an in-app update, `update.log` holds the end of npm's output.
 `todos.json` looks like this:
 
 ```json

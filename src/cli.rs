@@ -23,6 +23,8 @@ USAGE
     flodo sync setup <git-url>       Set the remote, turn sync on, sync
     flodo sync status                Show the remote and the last result
     flodo sync off                   Turn sync off (keeps the remote)
+    flodo update --check             Say whether a newer version is on npm
+    flodo update                     Explain how to update
 
 LIST OPTIONS
     --json                           Machine-readable JSON array
@@ -71,6 +73,9 @@ pub enum Command {
         ids: Vec<u64>,
     },
     Sync(SyncCommand),
+    Update {
+        check: bool,
+    },
     /// Renders the app icon to an `.iconset` directory. Used by
     /// `scripts/bundle-macos.sh`, not by anyone's to-do list.
     Icon {
@@ -169,6 +174,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             [status] if status == "status" => Ok(Command::Sync(SyncCommand::Status)),
             [off] if off == "off" => Ok(Command::Sync(SyncCommand::Off)),
             [other, ..] => Err(format!("unknown option for `sync`: {other:?}")),
+        },
+
+        "update" => match rest {
+            [] => Ok(Command::Update { check: false }),
+            [check] if check == "--check" => Ok(Command::Update { check: true }),
+            [other, ..] => Err(format!("unknown option for `update`: {other:?}")),
         },
 
         "icon" => match rest {
@@ -333,6 +344,8 @@ fn run_inner(cmd: Command) -> Result<String, String> {
 
         Command::Sync(sync) => run_sync(sync),
 
+        Command::Update { check } => run_update(check),
+
         Command::Icon { dir } => {
             let set = crate::icon::write_iconset(std::path::Path::new(&dir))
                 .map_err(|e| format!("writing icons to {dir}: {e}"))?;
@@ -424,6 +437,32 @@ Remote: {}
             .into())
         }
     }
+}
+
+/// The CLI only checks. Installing is left to the app's button or to npm
+/// itself, because Windows cannot replace the executable of a running Flodo.
+fn run_update(check: bool) -> Result<String, String> {
+    let manual = "close Flodo and run `npm install -g flodo@latest`, \
+                  or use the update button in the app's Settings.";
+    if !check {
+        return Err(format!(
+            "the command line does not install updates, because a running Flodo \
+             cannot be replaced. To update, {manual}"
+        ));
+    }
+    let install = crate::update::Install::current();
+    let npm = crate::update::Npm::find(install.as_ref().map(|i| i.prefix.as_path()));
+    let current = crate::update::CURRENT;
+    Ok(match crate::update::check(&npm)? {
+        Some(latest) if install.is_some() => {
+            format!("Flodo {latest} is available (this is {current}). To update, {manual}\n")
+        }
+        Some(latest) => format!(
+            "Flodo {latest} is available (this is {current}). This copy was installed \
+             outside npm; update it the way you installed it.\n"
+        ),
+        None => format!("Flodo {current} is up to date.\n"),
+    })
 }
 
 fn missing(store: &Store, ids: &[u64]) -> Result<(), String> {
@@ -588,6 +627,20 @@ mod tests {
         assert!(parse(&args("sync setup")).is_err());
         assert!(parse(&args("sync setup a b")).is_err());
         assert!(parse(&args("sync now")).is_err());
+    }
+
+    #[test]
+    fn update_parses_with_and_without_check() {
+        assert_eq!(
+            parse(&args("update")).unwrap(),
+            Command::Update { check: false }
+        );
+        assert_eq!(
+            parse(&args("update --check")).unwrap(),
+            Command::Update { check: true }
+        );
+        assert!(parse(&args("update --force")).is_err());
+        assert!(parse(&args("update --check extra")).is_err());
     }
 
     #[test]
