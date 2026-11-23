@@ -19,6 +19,10 @@ USAGE
     flodo done <id>...               Mark to-dos complete
     flodo undone <id>...             Mark to-dos not complete
     flodo rm <id>...                 Delete to-dos
+    flodo sync                       Sync with the git remote now
+    flodo sync setup <git-url>       Set the remote, turn sync on, sync
+    flodo sync status                Show the remote and the last result
+    flodo sync off                   Turn sync off (keeps the remote)
 
 LIST OPTIONS
     --json                           Machine-readable JSON array
@@ -39,6 +43,8 @@ PACKAGING
 NOTES
     Titles and bodies are markdown. Ids come from `flodo list --json`.
     Set FLODO_STATE_DIR to use a different data directory.
+    Sync uses the git on this computer and its saved sign-in; run
+    `git ls-remote <git-url>` once in a terminal if it cannot sign in.
 ";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,11 +70,20 @@ pub enum Command {
     Remove {
         ids: Vec<u64>,
     },
+    Sync(SyncCommand),
     /// Renders the app icon to an `.iconset` directory. Used by
     /// `scripts/bundle-macos.sh`, not by anyone's to-do list.
     Icon {
         dir: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncCommand {
+    Run,
+    Setup { remote: String },
+    Status,
+    Off,
 }
 
 fn parse_ids(rest: &[String]) -> Result<Vec<u64>, String> {
@@ -142,6 +157,19 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "rm" | "remove" | "delete" => Ok(Command::Remove {
             ids: parse_ids(rest)?,
         }),
+
+        "sync" => match rest {
+            [] => Ok(Command::Sync(SyncCommand::Run)),
+            [setup, remote] if setup == "setup" && !remote.trim().is_empty() => {
+                Ok(Command::Sync(SyncCommand::Setup {
+                    remote: remote.trim().to_string(),
+                }))
+            }
+            [setup] if setup == "setup" => Err("`sync setup` needs a git URL".into()),
+            [status] if status == "status" => Ok(Command::Sync(SyncCommand::Status)),
+            [off] if off == "off" => Ok(Command::Sync(SyncCommand::Off)),
+            [other, ..] => Err(format!("unknown option for `sync`: {other:?}")),
+        },
 
         "icon" => match rest {
             [dir] => Ok(Command::Icon { dir: dir.clone() }),
@@ -303,10 +331,97 @@ fn run_inner(cmd: Command) -> Result<String, String> {
             Ok(String::new())
         }
 
+        Command::Sync(sync) => run_sync(sync),
+
         Command::Icon { dir } => {
             let set = crate::icon::write_iconset(std::path::Path::new(&dir))
                 .map_err(|e| format!("writing icons to {dir}: {e}"))?;
             Ok(format!("{}\n", set.display()))
+        }
+    }
+}
+
+fn run_sync(cmd: SyncCommand) -> Result<String, String> {
+    let state_dir = store::state_dir();
+    let mut settings = store::load_settings_strict()?;
+    match cmd {
+        SyncCommand::Run => {
+            let Some(remote) = settings.sync.active_remote() else {
+                return Err(if settings.sync.remote.trim().is_empty() {
+                    "sync is not set up. Run `flodo sync setup <git-url>` first.".into()
+                } else {
+                    "sync is off. Run `flodo sync setup <git-url>` to turn it back on.".into()
+                });
+            };
+            crate::sync::run(&state_dir, remote).map(|outcome| {
+                format!(
+                    "{}
+",
+                    outcome.describe()
+                )
+            })
+        }
+        SyncCommand::Setup { remote } => {
+            if remote.starts_with('-') {
+                return Err(format!("{remote:?} doesn't look like a git URL"));
+            }
+            settings.sync.enabled = true;
+            settings.sync.remote = remote.clone();
+            store::save_settings_strict(&settings)?;
+            let outcome = crate::sync::run(&state_dir, &remote)
+                .map_err(|e| format!("sync is set up, but the first sync failed: {e}"))?;
+            Ok(format!(
+                "Sync is on.
+{}
+",
+                outcome.describe()
+            ))
+        }
+        SyncCommand::Status => {
+            let mut out = format!(
+                "Sync: {}
+Remote: {}
+",
+                if settings.sync.active_remote().is_some() {
+                    "on"
+                } else {
+                    "off"
+                },
+                if settings.sync.remote.trim().is_empty() {
+                    "(not set)".to_string()
+                } else {
+                    crate::sync::redact(settings.sync.remote.trim())
+                }
+            );
+            match crate::sync::last_result(&state_dir) {
+                Some(last) => {
+                    let when = chrono::DateTime::from_timestamp(last.at, 0)
+                        .map(|t| {
+                            t.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    let state = if last.ok { "ok" } else { "failed" };
+                    out.push_str(&format!(
+                        "Last sync: {when}, {state}: {}
+",
+                        last.message
+                    ));
+                }
+                None => out.push_str(
+                    "Last sync: never
+",
+                ),
+            }
+            Ok(out)
+        }
+        SyncCommand::Off => {
+            settings.sync.enabled = false;
+            store::save_settings_strict(&settings)?;
+            Ok("Sync is off. The remote and the local clone are kept.
+"
+            .into())
         }
     }
 }
@@ -448,6 +563,31 @@ mod tests {
         );
         assert!(parse(&args("icon")).is_err());
         assert!(parse(&args("icon a b")).is_err());
+    }
+
+    #[test]
+    fn sync_subcommands_parse() {
+        assert_eq!(
+            parse(&args("sync")).unwrap(),
+            Command::Sync(SyncCommand::Run)
+        );
+        assert_eq!(
+            parse(&args("sync setup git@gitlab.com:me/flodo-data.git")).unwrap(),
+            Command::Sync(SyncCommand::Setup {
+                remote: "git@gitlab.com:me/flodo-data.git".into()
+            })
+        );
+        assert_eq!(
+            parse(&args("sync status")).unwrap(),
+            Command::Sync(SyncCommand::Status)
+        );
+        assert_eq!(
+            parse(&args("sync off")).unwrap(),
+            Command::Sync(SyncCommand::Off)
+        );
+        assert!(parse(&args("sync setup")).is_err());
+        assert!(parse(&args("sync setup a b")).is_err());
+        assert!(parse(&args("sync now")).is_err());
     }
 
     #[test]

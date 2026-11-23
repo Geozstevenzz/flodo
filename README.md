@@ -25,6 +25,12 @@ This fork of [michellemayes/flodo](https://github.com/michellemayes/flodo)
 adds importance and custom flags, larger resize targets, stable drag reordering,
 a minimize button, search, optional target dates, and a sliding calendar.
 
+## New in 0.5.0
+
+- Keep the same tasks, flags, target dates and local calendar events on several
+  computers through a private git repository. See
+  [Sync across computers](#sync-across-computers).
+
 ## New in 0.4.0
 
 - Search task titles, descriptions, and custom flags beside the sorting dropdown.
@@ -62,6 +68,7 @@ The calendar image uses example local events.
 | Undo | Deletes, check-offs, clears and pastes all go back with <kbd>⌘</kbd><kbd>Z</kbd>, as many steps as you like. A delete is also announced and offered back for a few seconds. |
 | Size | A single binary, around 8 MB. No webview, no background service, no account. |
 | Storage | Plain JSON files you can read, edit, and sync. |
+| Sync | Optional. Keeps several computers in step through a private git repository you own. |
 | Scripting | A CLI over the same list, and an optional Claude skill for agents. |
 
 ## Install
@@ -152,6 +159,37 @@ send invitations. Outlook entries remain in memory for this session, and a
 failed refresh keeps the previous result with a warning. New Outlook, macOS,
 and Linux do not support this connection; local calendar entries work on all
 three platforms.
+
+### Sync across computers
+
+Flodo can keep your list the same on every computer you use, through a git
+repository that you own. It runs the `git` already installed on each computer
+and uses the sign-in that git has saved. Flodo stores no password or token.
+
+1. Create an empty private repository, for example a new GitLab project. Any
+   git host works.
+2. On each computer, make sure git can reach it. Set up a credential helper or
+   an SSH key, then run `git ls-remote <url>` once in a terminal to sign in.
+3. On each computer, run `flodo sync setup <url>`, or open Settings, tick
+   **Sync through a private git repository** and paste the URL.
+
+While the app is open it syncs shortly after launch, about ten seconds after
+you change something, every two minutes, and when you press **Sync now**.
+`flodo sync` runs one sync from a terminal, `flodo sync status` shows the last
+result, and `flodo sync off` stops syncing while keeping the remote.
+
+Tasks, custom flags, target dates and local calendar events are synced.
+Settings, the window position, which descriptions are expanded, and Outlook
+entries stay on each computer.
+
+When two computers change the same task, Flodo compares both with the last
+version they shared. Changes to different fields are both kept. When both
+changed the same field, the computer that is syncing keeps its own value. A
+task deleted on one computer and edited on the other is kept. Before a sync
+rewrites `todos.json` or `calendar.json`, the previous file is copied to
+`sync/last-local-todos.json` or `sync/last-local-calendar.json` in your data
+directory. Only the most recent copy is kept. Flodo's own clone of the
+repository lives in `sync/repo`.
 
 ### Standalone download
 
@@ -439,6 +477,10 @@ $ flodo list --count
 | `flodo done <id>...` | Mark complete |
 | `flodo undone <id>...` | Mark not complete |
 | `flodo rm <id>...` | Delete |
+| `flodo sync` | Sync with the git remote now |
+| `flodo sync setup <url>` | Set the remote, turn sync on, and sync |
+| `flodo sync status` | Show the remote and the last result |
+| `flodo sync off` | Stop syncing; the remote is kept |
 
 `--json` gives a stable record shape — internal fields never leak into it:
 
@@ -503,7 +545,9 @@ require it.
 | Windows | `%APPDATA%\Flodo\` |
 
 `todos.json` and `settings.json` hold your tasks and preferences. Local calendar
-entries use `calendar.json`, created when you first save an event.
+entries use `calendar.json`, created when you first save an event. With sync
+on, the `sync` folder holds Flodo's clone of your repository and the backup
+copies described in [Sync across computers](#sync-across-computers).
 `todos.json` looks like this:
 
 ```json

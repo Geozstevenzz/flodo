@@ -168,6 +168,26 @@ impl QuickCapture {
     }
 }
 
+/// Sync through a git remote. Machine-local, like everything in this file:
+/// each computer names the remote it can reach with its own credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SyncSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remote: String,
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
+}
+
+impl SyncSettings {
+    /// The remote to use, when sync is on and has somewhere to go.
+    pub fn active_remote(&self) -> Option<&str> {
+        let remote = self.remote.trim();
+        (self.enabled && !remote.is_empty()).then_some(remote)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_version")]
@@ -208,6 +228,8 @@ pub struct Settings {
     pub quick_capture: QuickCapture,
     #[serde(default)]
     pub window: WindowState,
+    #[serde(default)]
+    pub sync: SyncSettings,
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
 }
@@ -250,6 +272,7 @@ impl Default for Settings {
             hotkey: default_hotkey(),
             quick_capture: QuickCapture::default(),
             window: WindowState::default(),
+            sync: SyncSettings::default(),
             extra: Map::new(),
         }
     }
@@ -412,6 +435,31 @@ mod tests {
         assert_eq!(s.accent, Accent::Teal);
         let v: Value = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(v["somethingNew"]["deep"], true);
+    }
+
+    #[test]
+    fn sync_is_off_for_existing_files_and_round_trips() {
+        let s: Settings = serde_json::from_str(r#"{"accent":"teal"}"#).unwrap();
+        assert_eq!(s.sync, SyncSettings::default());
+        assert_eq!(s.sync.active_remote(), None);
+
+        let s: Settings = serde_json::from_str(
+            r#"{"sync":{"enabled":true,"remote":" git@host:me/data.git ","later":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.sync.active_remote(), Some("git@host:me/data.git"));
+        let v: Value = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(v["sync"]["later"], 1);
+
+        let off = SyncSettings {
+            enabled: false,
+            ..s.sync
+        };
+        assert_eq!(
+            off.active_remote(),
+            None,
+            "off keeps the remote but uses none"
+        );
     }
 
     #[test]

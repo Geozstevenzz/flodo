@@ -123,10 +123,17 @@ pub fn todos_mtime() -> Option<std::time::SystemTime> {
 /// empty list); an unreadable one is an error the caller must refuse to
 /// write over.
 pub fn load_todos_strict() -> Result<Store, String> {
-    let path = todos_path();
-    let raw = match std::fs::read_to_string(&path) {
+    load_strict_at(&todos_path())
+}
+
+/// The strict load, for any path. Sync uses it with explicit paths so its
+/// tests do not depend on `FLODO_STATE_DIR`.
+pub(crate) fn load_strict_at<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> Result<T, String> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
     serde_json::from_str(&raw).map_err(|e| {
@@ -135,6 +142,20 @@ pub fn load_todos_strict() -> Result<Store, String> {
             path.display()
         )
     })
+}
+
+/// Settings for the CLI: like the todos, a file that fails to parse is an
+/// error rather than a reason to write defaults over it.
+pub fn load_settings_strict() -> Result<Settings, String> {
+    let mut s: Settings = load_strict_at(&state_dir().join(SETTINGS_FILE))?;
+    s.clamp();
+    Ok(s)
+}
+
+pub fn save_settings_strict(settings: &Settings) -> Result<(), String> {
+    let path = state_dir().join(SETTINGS_FILE);
+    let json = serde_json::to_string_pretty(settings).map_err(|e| format!("{e}"))?;
+    write_atomic(&path, &json).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 /// Save that reports failure, for the CLI (the GUI logs and carries on).

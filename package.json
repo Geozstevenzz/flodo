@@ -1,7 +1,7 @@
 {
   "name": "flodo",
-  "version": "0.4.0",
-  "description": "Floating desktop to-do list with search, target dates and a calendar drawer",
+  "version": "0.5.0",
+  "description": "Floating desktop to-do list with search, target dates, a calendar drawer and git sync",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -18,7 +18,7 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

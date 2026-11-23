@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) const CALENDAR_FILE: &str = "calendar.json";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
@@ -141,7 +143,7 @@ impl Default for Calendar {
             open: false,
             agenda: Agenda::default(),
             editor: None,
-            path: store::state_dir().join("calendar.json"),
+            path: store::state_dir().join(CALENDAR_FILE),
             writable: true,
             disk_raw: None,
             error: None,
@@ -159,6 +161,20 @@ impl Calendar {
         let mut calendar = Self::default();
         calendar.reload();
         calendar
+    }
+
+    /// Adopts `calendar.json` when another process (sync, usually) rewrote
+    /// it. An open editor stays open; its save then applies on top of the
+    /// reloaded agenda instead of failing with "changed elsewhere".
+    pub fn reload_if_changed(&mut self) {
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return,
+        };
+        if raw != self.disk_raw {
+            self.reload();
+        }
     }
 
     fn reload(&mut self) {
@@ -633,25 +649,22 @@ impl Calendar {
         if cancel {
             self.editor = None;
         } else if save || delete {
+            self.reload_if_changed();
+            let Some(editor) = self.editor.as_ref() else {
+                return;
+            };
             let mut agenda = self.agenda.clone();
             let result = if delete {
                 agenda.events.retain(|event| Some(event.id) != editor.id);
                 Ok(())
             } else {
-                let next = agenda
-                    .events
-                    .iter()
-                    .map(|event| event.id)
-                    .max()
-                    .unwrap_or(0)
-                    .checked_add(1);
-                match editor.id.or(next) {
-                    None => Err("No more event IDs are available.".into()),
-                    Some(id) => editor.event(id).map(|event| {
-                        agenda.events.retain(|old| old.id != id);
-                        agenda.events.push(event);
-                    }),
-                }
+                let id = editor
+                    .id
+                    .unwrap_or_else(|| new_event_id(agenda.events.iter().map(|event| event.id)));
+                editor.event(id).map(|event| {
+                    agenda.events.retain(|old| old.id != id);
+                    agenda.events.push(event);
+                })
             };
             match result.and_then(|()| self.persist(agenda)) {
                 Ok(()) => self.editor = None,
@@ -759,6 +772,38 @@ fn outlook_row(
                 });
             });
     });
+}
+
+/// A new event id that another computer is very unlikely to pick too:
+/// clock-derived like task ids, and always above every id already in use.
+/// Older files with small sequential ids load unchanged.
+pub(crate) fn new_event_id(used: impl IntoIterator<Item = u64>) -> u64 {
+    let from_data = used
+        .into_iter()
+        .max()
+        .map_or(0, |max| max.saturating_add(1));
+    (crate::model::now_millis() << 12).max(from_data)
+}
+
+/// Parses and validates a calendar file, returning its canonical JSON form for
+/// sync to merge. `None` means the file must not be written over.
+pub(crate) fn parse_agenda(raw: &str) -> Option<serde_json::Value> {
+    let agenda: Agenda = serde_json::from_str(raw).ok()?;
+    valid_agenda(&agenda)
+        .then(|| serde_json::to_value(&agenda).ok())
+        .flatten()
+}
+
+/// The canonical form of an empty calendar, for a computer that has none yet.
+pub(crate) fn empty_agenda() -> serde_json::Value {
+    serde_json::to_value(Agenda::default()).unwrap_or_default()
+}
+
+/// Whether one merged event still makes sense on its own (a field-by-field
+/// merge can pair one side's start with the other side's end).
+pub(crate) fn event_is_valid(value: &serde_json::Value) -> bool {
+    serde_json::from_value::<Event>(value.clone())
+        .is_ok_and(|event| !event.title.trim().is_empty() && event.end > event.start)
 }
 
 fn valid_agenda(agenda: &Agenda) -> bool {
@@ -975,6 +1020,48 @@ mod tests {
         assert!(!calendar.writable);
         assert!(!calendar.open);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn calendar_reloads_a_valid_external_change_and_keeps_the_editor_open() {
+        let path = std::env::temp_dir().join(format!(
+            "flodo-calendar-reload-{}-{}.json",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut calendar = Calendar {
+            path: path.clone(),
+            ..Calendar::default()
+        };
+        calendar.persist(Agenda::default()).unwrap();
+        calendar.editor = Some(Editor::new(date("2026-11-20")));
+        let mut editor = Editor::new(date("2026-11-20"));
+        editor.title = "Synced in".into();
+        let synced = Agenda {
+            events: vec![editor.event(7).unwrap()],
+            ..Agenda::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&synced).unwrap()).unwrap();
+        calendar.reload_if_changed();
+        assert!(calendar.writable && calendar.error.is_none());
+        assert_eq!(calendar.agenda.events[0].title, "Synced in");
+        assert!(
+            calendar.editor.is_some(),
+            "an open editor survives a reload"
+        );
+        // With the change adopted, a save goes through instead of refusing.
+        let mut agenda = calendar.agenda.clone();
+        agenda.events.push(editor.event(new_event_id([7])).unwrap());
+        calendar.persist(agenda).unwrap();
+        assert_eq!(calendar.agenda.events.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn new_event_ids_are_clock_based_and_above_existing_ones() {
+        let id = new_event_id([1, 2, 3]);
+        assert!(id > 1 << 40, "clock-based, so far above old sequential ids");
+        assert_eq!(new_event_id([u64::MAX - 1]), u64::MAX);
     }
 
     #[test]

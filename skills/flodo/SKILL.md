@@ -113,5 +113,14 @@ flodo add "Fix the N+1 query in the orders report" \
 - Set `FLODO_STATE_DIR` to point at a different data directory; the CLI and the
   app both honour it.
 - Writes show up in the running app within about a second — no restart needed.
+- Sync is optional and uses a private git repository the user owns.
+  `flodo sync` syncs now, `flodo sync status` shows the remote and the last
+  result, `flodo sync setup <git-url>` turns it on and `flodo sync off` turns it
+  off. Only run `setup` or `off` when the user asks. A failed sync exits
+  non-zero and changes nothing; report the message. The app syncs on its own,
+  so there is no need to sync after every `add` or `done`.
+- Sync keeps its clone in `sync/repo` and the pre-sync copies in
+  `sync/last-local-todos.json` and `sync/last-local-calendar.json` under the
+  data directory. Never edit or commit in that clone.
 - On Windows, release builds are GUI-subsystem and print nothing to a console.
   The CLI is intended for macOS and Linux.

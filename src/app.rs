@@ -7,7 +7,7 @@ use crate::settings::{
     Appearance, FontChoice, Settings, SortOrder, FONT_SIZE_RANGE, OPACITY_RANGE, SPACING_RANGE,
 };
 use crate::theme::{Accent, Palette};
-use crate::{capture, fonts, hotkey, store, ui};
+use crate::{capture, fonts, hotkey, merge, store, sync, ui};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, Vec2};
 use std::collections::HashMap;
@@ -267,6 +267,16 @@ pub struct Flodo {
     /// overwriting them on our next debounced save.
     disk_mtime: Option<std::time::SystemTime>,
     last_disk_check: Instant,
+    /// The todo file as we last loaded or saved it: the base for merging when
+    /// the file changes underneath unsaved edits.
+    disk_store: Store,
+
+    sync: sync::Client,
+    /// Off for the screenshot harness, which must never touch a network.
+    sync_allowed: bool,
+    /// The remote field's text, applied when it loses focus so a half-typed
+    /// URL never starts a sync.
+    sync_draft: String,
 }
 
 impl Flodo {
@@ -281,7 +291,9 @@ impl Flodo {
             _ => None,
         };
 
+        let sync_draft = settings.sync.remote.clone();
         let mut app = Self {
+            disk_store: todos.clone(),
             store: todos,
             settings,
             notice,
@@ -316,6 +328,9 @@ impl Flodo {
             hidden: false,
             disk_mtime: store::todos_mtime(),
             last_disk_check: Instant::now(),
+            sync: sync::Client::default(),
+            sync_allowed: std::env::var_os("FLODO_DEMO").is_none(),
+            sync_draft,
         };
         app.hotkey = hotkey::Hotkey::register(&app.settings.hotkey);
         app.seed_demo_if_requested();
@@ -861,9 +876,7 @@ impl Flodo {
     fn save_if_due(&mut self, ctx: &egui::Context) {
         if let Some(t) = self.dirty_todos {
             if t.elapsed() >= SAVE_DEBOUNCE {
-                store::save_todos(&self.store);
-                self.disk_mtime = store::todos_mtime();
-                self.dirty_todos = None;
+                self.save_todos();
             } else {
                 // egui only repaints on events, so without this a pending save
                 // could sit unwritten until the next mouse move.
@@ -881,13 +894,23 @@ impl Flodo {
     }
 
     pub fn flush(&mut self) {
-        if self.dirty_todos.take().is_some() {
-            store::save_todos(&self.store);
-            self.disk_mtime = store::todos_mtime();
+        if self.dirty_todos.is_some() {
+            self.save_todos();
         }
         if self.dirty_settings.take().is_some() {
             store::save_settings(&self.settings);
         }
+    }
+
+    /// Writes the list, first folding in anything another process wrote
+    /// since we last looked, so a save can never revert a sync or a CLI edit.
+    fn save_todos(&mut self) {
+        self.absorb_disk_changes();
+        store::save_todos(&self.store);
+        self.disk_mtime = store::todos_mtime();
+        self.disk_store = self.store.clone();
+        self.dirty_todos = None;
+        self.sync.saved();
     }
 
     /// Picks up edits made by another process. Stat-ing once a second is
@@ -897,45 +920,64 @@ impl Flodo {
             return;
         }
         self.last_disk_check = Instant::now();
+        self.calendar.reload_if_changed();
+        if self.absorb_disk_changes() {
+            ctx.request_repaint();
+        }
+    }
 
+    /// Adopts a todo file another process (the CLI, or sync) rewrote. Returns
+    /// whether there was anything to adopt.
+    fn absorb_disk_changes(&mut self) -> bool {
         let mtime = store::todos_mtime();
         if mtime == self.disk_mtime {
-            return;
+            return false;
         }
         self.disk_mtime = mtime;
 
         let Ok(disk) = store::load_todos_strict() else {
             // Unreadable on disk: keep what we have in memory rather than
             // dropping the user's list on the floor.
-            return;
+            return false;
         };
 
-        match self.dirty_todos {
+        self.store = match self.dirty_todos {
             // Nothing unsaved locally, so the file on disk is the truth.
-            None => {
-                let editing = self.editing.as_ref().map(|e| e.id);
-                self.store = disk;
-                // Don't leave an editor open on a todo that just disappeared.
-                if editing.is_some_and(|id| self.store.get(id).is_none()) {
-                    self.editing = None;
-                }
-            }
-            // We have unsaved edits, so ours win — but still adopt anything
-            // new, so a `flodo add` while you were mid-sentence isn't lost.
-            Some(_) => {
-                let known: std::collections::HashSet<u64> =
-                    self.store.todos.iter().map(|t| t.id).collect();
-                for todo in disk
-                    .todos
-                    .into_iter()
-                    .filter(|t| !known.contains(&t.id))
-                    .rev()
-                {
-                    self.store.todos.insert(0, todo);
-                }
-            }
+            None => disk.clone(),
+            // Unsaved edits: a three-way merge against the file as we last
+            // knew it keeps both those edits and whatever arrived. Taking
+            // ours wholesale would revert the arrivals, and the next sync
+            // would send that revert to every other computer.
+            Some(_) => merge::merge_store(&self.disk_store, &self.store, &disk),
+        };
+        self.disk_store = disk;
+        // Don't leave an editor open on a todo that just disappeared.
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|e| self.store.get(e.id).is_none())
+        {
+            self.editing = None;
         }
-        ctx.request_repaint();
+        true
+    }
+
+    /// Starts a background sync when one is due, and picks up its result.
+    fn poll_sync(&mut self, ctx: &egui::Context) {
+        if !self.sync_allowed {
+            return;
+        }
+        let finished = self.sync.tick(
+            ctx,
+            &store::state_dir(),
+            self.settings.sync.active_remote(),
+            self.dirty_todos.is_some(),
+        );
+        if finished {
+            self.calendar.reload_if_changed();
+            self.absorb_disk_changes();
+            ctx.request_repaint();
+        }
     }
 
     fn track_geometry(&mut self, ctx: &egui::Context) {
@@ -2561,11 +2603,75 @@ impl Flodo {
                 }
 
                 self.quick_capture_picker(ui, p);
+                self.sync_settings(ui, p);
 
                 ui.add_space(2.0);
                 ui::rule(ui, p);
                 self.shortcut_list(ui, p);
             });
+    }
+
+    /// Sync in three lines: on or off, where to, and how it last went.
+    fn sync_settings(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let size = self.settings.font_size;
+        ui.label(
+            egui::RichText::new("Sync")
+                .color(p.muted)
+                .size(size * 0.9)
+                .family(FontFamily::Name(FAMILY_UI.into())),
+        );
+        let mut enabled = self.settings.sync.enabled;
+        if ui
+            .checkbox(
+                &mut enabled,
+                egui::RichText::new("Sync through a private git repository")
+                    .color(p.muted)
+                    .size(size * 0.9),
+            )
+            .changed()
+        {
+            self.settings.sync.enabled = enabled;
+            self.touch_settings();
+            if enabled {
+                self.sync.sync_now();
+            }
+        }
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut self.sync_draft)
+                .id(egui::Id::new("sync-remote"))
+                .hint_text("git@gitlab.com:you/flodo-data.git")
+                .desired_width(f32::INFINITY),
+        );
+        if field.lost_focus() && self.sync_draft.trim() != self.settings.sync.remote {
+            self.settings.sync.remote = self.sync_draft.trim().to_string();
+            self.touch_settings();
+            self.sync.sync_now();
+        }
+        let mut now = false;
+        ui.horizontal_wrapped(|ui| {
+            let ready = self.settings.sync.active_remote().is_some() && !self.sync.is_running();
+            now = ui
+                .add_enabled(ready, egui::Button::new("Sync now"))
+                .clicked();
+            let (text, color) = match &self.sync.status {
+                sync::Status::Syncing => ("Syncing…".to_string(), p.muted),
+                sync::Status::Synced(at, message) => (
+                    format!("Synced at {}. {message}", at.format("%H:%M")),
+                    p.muted,
+                ),
+                sync::Status::Failed(error) => (error.clone(), p.danger),
+                sync::Status::Idle if self.settings.sync.active_remote().is_some() => {
+                    ("Not synced yet.".to_string(), p.muted)
+                }
+                sync::Status::Idle => ("Off.".to_string(), p.muted),
+            };
+            ui.label(egui::RichText::new(text).color(color).size(size * 0.8));
+        });
+        if now {
+            // Unsaved edits go to disk first, so this sync carries them.
+            self.flush();
+            self.sync.sync_now();
+        }
     }
 
     /// Off, or one modifier — a single row that both switches quick capture on
@@ -3068,6 +3174,7 @@ impl eframe::App for Flodo {
         // an immutable borrow of the store.
         self.settle_edits(&ctx);
         self.save_if_due(&ctx);
+        self.poll_sync(&ctx);
     }
 }
 
@@ -3361,6 +3468,51 @@ mod tests {
         assert!(app.store.todos.is_empty());
     }
 
+    #[test]
+    fn the_sync_remote_applies_when_its_field_is_left_not_while_typing() {
+        let ctx = ctx();
+        let mut app = app();
+        let p = Palette::new(Accent::Purple, true);
+        app.show_settings = true;
+        let pass = |app: &mut Flodo, raw| {
+            ctx.run_ui(raw, |ui| {
+                app.handle_shortcuts(ui.ctx());
+                egui::CentralPanel::default().show(ui, |ui| app.settings_sheet(ui, &p));
+            })
+        };
+        for _ in 0..3 {
+            pass(&mut app, input(vec![]));
+        }
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("sync-remote")));
+        pass(
+            &mut app,
+            input(vec![egui::Event::Text("git@host:me/data.git".into())]),
+        );
+        assert_eq!(app.sync_draft, "git@host:me/data.git");
+        assert!(
+            app.settings.sync.remote.is_empty(),
+            "nothing applied mid-typing"
+        );
+        assert!(app.composer.is_empty() && app.store.todos.is_empty());
+        pass(
+            &mut app,
+            input(vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+        );
+        assert_eq!(app.settings.sync.remote, "git@host:me/data.git");
+        assert!(app.dirty_settings.is_some());
+        assert_eq!(
+            app.settings.sync.active_remote(),
+            None,
+            "still off until ticked"
+        );
+    }
+
     fn rows(heights: &[f32]) -> Vec<Option<Rect>> {
         let mut y = 0.0;
         heights
@@ -3529,6 +3681,10 @@ mod tests {
             hidden: false,
             disk_mtime: None,
             last_disk_check: Instant::now(),
+            disk_store: Store::default(),
+            sync: sync::Client::default(),
+            sync_allowed: false,
+            sync_draft: String::new(),
         }
     }
 
